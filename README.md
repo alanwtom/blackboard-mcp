@@ -13,7 +13,7 @@ just copy and paste each command exactly as written.
 1. A Mac (this guide is for macOS)
 2. [Google Chrome](https://www.google.com/chrome/)
 3. [Node.js](https://nodejs.org) version 20 or newer (get the LTS installer)
-4. An AI app that supports MCP, such as [Claude Desktop](https://claude.ai/download)
+4. An AI app that supports MCP, such as [Claude Desktop](https://claude.ai/download) which is free for all Syracuse Students!
 
 Not sure if you have Node.js? Open Terminal (Cmd + Space, type "Terminal", press Enter), type
 `node -v`, and press Enter. If you see `v20` or higher you are set.

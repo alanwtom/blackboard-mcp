@@ -1,248 +1,239 @@
-# blackboard-mcp
+# Blackboard MCP — your Blackboard, readable by your AI
 
-A **local-first, read-only MCP server** that lets an AI agent read the Blackboard data you
-(the signed-in student) can already see. Initial target: **Syracuse University** —
-`https://blackboard.syr.edu`.
+This lets you ask an AI assistant things like:
 
-It does **not** require a Blackboard REST application key or Syracuse administrator approval.
-It uses your own authenticated Blackboard browser session: you log in once through a normal
-Chrome window (completing Syracuse SSO + Duo yourself), and the server reuses that session for
-low-volume, read-only requests.
+> *"What do I have due this week?"*
+> *"What did my professor post in Minds and Machines lately?"*
+> *"What did I get on the last problem set, and was there feedback?"*
+> *"Give me everything about the Essay assignment — instructions, files, and all."*
 
-```
-you (Chrome window, once) ──► Syracuse SSO + Duo ──► Blackboard
-                                                        │
-blackboard-mcp (local) ── authenticated requests ───────┘
-        │
-        └── MCP over stdio ──► your AI agent (Claude Desktop, Claude Code, ...)
-```
+and get real answers from **your own Blackboard** — your courses, your assignments, your
+grades, your class announcements. Nothing is invented, nothing is submitted, nothing leaves
+your laptop.
 
-## What it does
+It works by using **your own logged-in Blackboard session** — the same one your browser uses
+— so it can only ever see what *you* can already see. It is **read-only**: it can look, but it
+can never submit, post, message, delete, or change anything.
 
-Exposes nine tools to any MCP client:
+Whether you're a studio art major or a computer science major, setup takes about ten minutes
+and you only do it once. If you've never opened a terminal before, just follow the steps
+exactly — every command is copy-paste.
 
-| Tool | Purpose |
-| --- | --- |
-| `list_courses` | All currently visible courses (returns the course ids used everywhere else) |
-| `get_course_content` | Course folders, documents, files, assignments, tests, links — light hierarchy expansion; `folder_id` for deeper dives |
-| `get_announcements` | Course announcements, newest first, optional `since` |
-| `get_assignments` | Assignments/assessments merged and deduplicated from course content, the gradebook, and the calendar; optional course scoping and due-date window |
-| `get_grades` | Your grades for one course: score, points possible, percentage, feedback, grading status |
-| `get_attachment` | Downloads a course file (PDF, DOCX, PPTX, TXT, images, …) into `~/.blackboard-mcp/downloads` and returns the local path |
-| `get_upcoming_work` | Upcoming work across **all** courses sorted by due date (default next 7 days) |
-| `get_recent_updates` | Announcements, new/changed content, changed assignments, new grades since a point in time |
-| `get_assignment_context` | One package per assignment: instructions, due date, points, rubric (when available), attachments, your grade/status, related announcements |
+---
 
-## Security model
+## What you need (check these three things)
 
-- **Local-first**: everything runs on your machine. No server, no account, no web UI.
-- **Read-only**: the server only issues GET requests. It never submits assignments or quizzes,
-  posts to discussions, sends messages, or touches any setting. There is no write code in the
-  repository at all.
-- **Student-scoped**: requests go through your own logged-in session, so the agent can never
-  see anything Blackboard doesn't already show you. Permission-denied responses are surfaced
-  as errors, never retried or bypassed.
-- **Low-volume**: cached responses (5–10 minute TTLs), small delays between paginated requests,
-  hard caps on pages/items per call, and one shared browser session that closes after 5 idle
-  minutes.
-- **No credential access**: the server never asks for, reads, stores, or types your NetID
-  password, Duo codes, MFA secrets, or backup/recovery codes. Login is entirely manual in a
-  visible Chrome window; the server just waits for you to land back on Blackboard.
-- **No secret leakage**: cookies, tokens, and browser storage never leave the browser profile;
-  they are never returned by tools or logged. Error messages are masked and truncated, and the
-  transport refuses to fetch anything off `blackboard.syr.edu`.
-- **Contained file access**: `get_attachment` only saves into `~/.blackboard-mcp/downloads`,
-  with sanitized file names. It cannot read or write arbitrary paths.
+1. **A Mac** (this guide is written for macOS; Windows works similarly but is untested).
+2. **Google Chrome** — [get it free here](https://www.google.com/chrome/) if you don't have it.
+3. **Node.js** — a free, safe program other software runs on.
+   - Not sure if you have it? Open **Terminal** (press `Cmd + Space`, type `Terminal`, press
+     Enter), type `node -v` and press Enter.
+   - If you see something like `v20.9.0` or higher, you're set. If you see "command not
+     found", download the **LTS** version from [nodejs.org](https://nodejs.org) and click
+     through the installer.
 
-## Installation
+## An AI assistant that can use it
 
-Requires Node.js 20+ and Google Chrome.
+This is a "MCP server" — a plug-in that lets AI assistants (like Claude) use outside tools.
+You'll need one that supports MCP, for example **Claude Desktop** (free from
+[claude.ai/download](https://claude.ai/download)) or **Claude Code**. Other MCP-capable apps
+work too.
+
+---
+
+## Setup — do these five steps once
+
+Open **Terminal** (Cmd + Space → type `Terminal` → Enter), then follow along. You can
+copy-paste each command and press Enter after each one.
+
+### Step 1 — Get the project
 
 ```bash
+cd ~/Documents/Github
+git clone https://github.com/alanwtom/blackboard-mcp.git
 cd blackboard-mcp
+```
+
+> This downloads the project into your Documents → Github folder. If `git` says it's not
+> installed, macOS will offer to install it — say yes, then run the command again.
+
+### Step 2 — Install the pieces
+
+```bash
 npm install
 ```
 
-## Login (one time, then rarely)
+> This fetches the building blocks the project needs. Takes a minute or two — you'll see some
+> scrolling text. That's normal.
+
+### Step 3 — Log in to Blackboard (the only step that involves you)
 
 ```bash
 npm run login
 ```
 
-1. A **visible Chrome window** opens using a dedicated profile (not your normal Chrome profile).
-2. You sign in with your NetID and complete **Duo exactly as you normally would**.
-3. The tool detects when you land back on Blackboard, verifies the session with one
-   authenticated call, saves nothing but a timestamp, and closes the window.
+A **Chrome window will open**. Sign in with your NetID and approve Duo, exactly like you
+normally would. **Important: do this in the new window** — it has a big red banner across the
+top and says "SIGN IN HERE" in its title, so you can't miss it.
 
-The session itself lives in the dedicated browser profile at
-`~/.blackboard-mcp/chrome-profile`, plus a cookie snapshot at
-`~/.blackboard-mcp/browser-state.json` (mode 0600). Blackboard's session cookie does not
-survive a browser restart, so the snapshot carries the session between runs — and when it
-expires, the server follows Syracuse's SAML SSO entry silently: if your Microsoft session is
-still valid, you're re-authenticated with zero interaction; you only ever re-run
-`npm run login` when Microsoft itself demands credentials or Duo.
+When the tool sees you've landed back on Blackboard, it closes the window by itself and
+confirms. **Your password and Duo codes are never seen, saved, or transmitted anywhere by
+this project** — that part is always just you, typing in a real browser.
 
-Syracuse detail worth knowing: Blackboard answers on two hostnames
-(`blackboard.syr.edu` and `blackboard.syracuse.edu`) with separate cookie domains; the session
-layer probes both and issues same-origin requests against whichever holds the session.
-
-> **Why passwords and MFA are never stored:** the login step is *you typing in a real browser*.
-> The automation only watches the URL bar and, once you're through, makes authenticated calls
-> with the browser's own cookies. At no point does any code see a password field, a Duo push,
-> or a backup code — there is nothing to store and nothing to leak.
-
-## Session storage
-
-Everything persistent lives under `~/.blackboard-mcp/` (outside the repo):
-
-| Path | Contents |
-| --- | --- |
-| `chrome-profile/` | The dedicated Chromium profile — browser-format cookies/storage |
-| `browser-state.json` | Snapshot of the authenticated cookies (mode 0600), restored into each new browser; this is what carries the session between runs |
-| `downloads/` | Files saved via `get_attachment` |
-| `session-meta.json` | Only `lastLoginAt` / `lastVerifiedAt`, your display name, and the working origin — no tokens |
-
-Nothing session-related is ever written inside the repository, and `.gitignore` guards against
-it anyway.
-
-## CLI commands
+### Step 4 — Check that it worked
 
 ```bash
-npm run login      # interactive login (visible Chrome, SSO + Duo by hand)
-npm run status     # does the stored session still work?
-npm run courses    # print your currently visible courses (milestone check)
-npm run discover   # dev tool: record the Blackboard API calls your own browsing makes
-npm run logout     # wipe the dedicated profile from this machine
-npm start          # run the MCP server on stdio
+npm run courses
 ```
 
-`npm run status` prints `Blackboard session expired. Run npm run login again.` when the session
-is gone. It never attempts to renew MFA or re-authenticate on your behalf.
+You should see your real course list, like:
 
-`npm run discover` is how the integration stays honest: browse Blackboard normally while it
-records every `/learn/api/...` and `/bbcswebdav/...` request the Ultra UI itself makes, so the
-endpoints used here can be verified against what Syracuse's deployment really serves instead of
-guessed.
+```
+PHI.378.M001.FALL26.Minds and Machines
+CIS.473.M001.SPRING26.Automata and Computability
+...
+```
 
-## MCP setup
+If you see your courses — congratulations, the hard part is done.
 
-The server speaks MCP over stdio. Example client configuration — point `args` at the built
-`dist/index.js`:
+### Step 5 — Connect it to your AI assistant
+
+These instructions are for **Claude Desktop**; other apps have a similar settings screen.
+
+1. Open Claude Desktop → **Settings** → **Developer** → **Edit Config**. This opens a
+   settings file.
+2. Add this block (if the file already has content, add it inside the existing `{ }` —
+   a friendly way to think of it: you're introducing your AI to a new helper):
 
 ```json
 {
   "mcpServers": {
     "blackboard": {
       "command": "node",
-      "args": ["/absolute/path/to/blackboard-mcp/dist/index.js"]
+      "args": ["/Users/yourname/Documents/Github/blackboard-mcp/dist/index.js"]
     }
   }
 }
 ```
 
-(Claude Desktop: `claude_desktop_config.json`; Claude Code: `claude mcp add blackboard -- node
-/absolute/path/to/blackboard-mcp/dist/index.js`; any other MCP client: same shape.)
+3. **Change `/Users/yourname/...` to where you put the project.** Not sure? Type this in
+   Terminal and copy what it prints:
 
-Start the server after logging in at least once. While idle it launches nothing; the first tool
-call opens a headless Chrome on the dedicated profile and reuses it for subsequent calls.
+   ```bash
+   echo ~/Documents/Github/blackboard-mcp/dist/index.js
+   ```
 
-### Environment variables
+4. Save the file and **quit Claude Desktop completely** (Cmd + Q), then reopen it. You should
+   see a hammer/tools icon in the message box — that's your new Blackboard connection.
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `BB_BROWSER_CHANNEL` | `chrome` | Browser channel used by Playwright |
-| `BB_HEADLESS` | `1` | Set `0` to watch the headless session work (debugging) |
-| `BLACKBOARD_MCP_HOME` | `~/.blackboard-mcp` | Where profile/downloads/meta live |
+> **Note:** Step 5 points your AI at the folder where YOU downloaded the project. The exact
+> folder path is different on every computer — that's why Step 5.3 has you look yours up.
 
-## Reconnecting after session expiration
+---
 
-When the session dies you'll get `BLACKBOARD_SESSION_EXPIRED: Blackboard session expired. Run
-npm run login again.` from tools, and the exact same sentence from `npm run status`. The fix is
-always the same manual flow:
+## Using it
 
-```bash
-npm run login    # complete SSO + Duo in the window that opens
-npm run status   # confirm: "Blackboard session active"
-```
+Just talk to your AI like a person:
 
-The server drops its browser on the next call and picks up the fresh session automatically.
-No MFA renewal is ever automated — by design.
+- *"What's due in the next 7 days across all my classes?"*
+- *"Any new announcements in my courses this week?"*
+- *"What's my current grade in Calculus?"*
+- *"Find the Essay assignment and pull up the instructions and attached files."*
+- *"Download the lecture slides from Week 3 so I can look at them."*
 
-## Supported tools
+The first question may take 10–20 seconds (it's politely asking Blackboard for your data).
+After that it's quick.
 
-See the table above. All tools are annotated read-only and accept safe Blackboard identifiers
-(course ids like `_26184_1` or course codes like `CIS.473`, content ids, file ids) — never
-paths or URLs. Identifiers always come from earlier tool calls, starting with `list_courses`.
+Files your AI downloads (like lecture slides) are saved to a folder on your Mac:
+`~/.blackboard-mcp/downloads`. Your AI will tell you the exact location of each file.
 
-Errors are short, coded messages — `BLACKBOARD_SESSION_EXPIRED`, `NOT_LOGGED_IN`,
-`COURSE_NOT_FOUND`, `CONTENT_NOT_AVAILABLE`, `PERMISSION_DENIED`,
-`BLACKBOARD_REQUEST_FAILED`, `ATTACHMENT_NOT_FOUND`, `INVALID_INPUT` — never raw HTML dumps.
+## Troubleshooting — when things act up
 
-## Read-only restrictions (enforced by omission)
+| What you see | What to do |
+| --- | --- |
+| "Blackboard session expired. Run npm run login again." | Totally normal after a while. Run `npm run login` in Terminal and sign in again. Often you won't even need to — the tool quietly re-uses your school's sign-in on its own. |
+| Login worked but a question still fails | Run `npm run status` to double-check, then ask again — Blackboard sometimes has brief hiccups. |
+| The login window appeared but nothing happens | Make sure you're typing your NetID **in the window with the red banner**, not your usual Chrome. It's a separate, private browser just for this tool. |
+| My AI doesn't show any Blackboard tools | Quit and reopen your AI app completely after editing the config, and double-check the folder path in Step 5. |
+| A course shows no assignments or grades | Some older courses are archived by the university and can't be read by anyone (including in your browser). Brand-new courses may just not have anything posted yet. |
 
-There is no code — and intentionally no tool — for: submitting assignments or quizzes, posting
-to discussions, messaging instructors, changing grades, creating announcements, modifying
-content, changing enrollments, editing user info, or deleting anything. Where Blackboard's own
-APIs could write, only the read verb is implemented.
+## What this will never do
 
-## Known limitations
+By design, there is no code in this project that could:
 
-- **Ultra-first**: built against Blackboard Ultra course pages (Syracuse's default). Classic
-  ("Original") courses mostly work through the same APIs, but content shapes can differ.
-- **Endpoints verified against live traffic**: the client uses `users/me`,
-  `users/me/courses?expand=course` (enrollment + course in one call), course contents,
-  announcements, the Ultra calendar, and the v2 gradebook — all confirmed against Syracuse's
-  deployment on 2026-08-29 (`list_courses` returned 46 live courses). Paging is capped at 100
-  per page (this deployment rejects higher limits). Attachment lookup tries the content-files
-  endpoints before falling back to `/bbcswebdav` links embedded in content; run
-  `npm run discover` to verify any endpoint against your own browsing.
-- **Instructors and rubrics are best-effort**: course objects don't carry instructor names, and
-  rubric data appears only where the deployment exposes it to students.
-- **Grades cost one request per gradebook column** (cached for 5 minutes). This is the main
-  place where low-volume pacing is visible.
-- **`get_recent_updates` sweeps bounded** (max 12 courses per call) to stay gentle.
-- Large attachments (>200 MB) are refused; small text files come back with an inline excerpt,
-  everything else as a saved file path.
+- submit an assignment or a quiz,
+- post in a discussion or message a professor,
+- change a grade, delete anything, or edit your settings.
 
-## Development
+It only ever **reads**. And it only reads things **you can already see** when you log in —
+it uses your session, not a special backdoor.
 
-```bash
-npm run typecheck   # tsc --noEmit
-npm test            # vitest: 60 tests, all network mocked — never touches Blackboard
-npm run build       # compile to dist/
-```
+## Your privacy, in plain words
 
-Unit tests cover course/assignment/announcement/content normalization, date parsing, duplicate
-merging, pagination, session-expiration mapping, argument validation, error codes, and
-attachment sanitization. MCP integration tests drive the real server over an in-memory
-transport with a fake authenticated transport, so the domain code paths are exercised
-end-to-end without a browser. Live Blackboard checks are deliberately manual (`npm run login`,
-`npm run courses`, `npm run discover`) and never part of the test suite.
+- Your **password and Duo codes are never requested, read, or stored** by this project.
+  Login is you typing in a real Chrome window; the project just waits politely.
+- Everything stays **on your Mac**. No server, no account, no analytics.
+- Your sign-in lives in a private browser profile at `~/.blackboard-mcp/` on your computer.
+  **Never share or back up that folder** — it's the equivalent of leaving your browser logged
+  in.
+- You can erase everything at any time: run `npm run logout`, or just delete the
+  `~/.blackboard-mcp` folder.
 
-## Responsible use
+## Being a good citizen
 
-This tool drives Blackboard through **your own** authenticated student session. That is
-functionally the same as you clicking around in a browser, but an agent can do it faster than
-a human — so keep a few things in mind:
+Use it for yourself, at a human pace. The tool is deliberately gentle with Blackboard's
+servers (caching, small delays, request caps) — keep it that way, and check your
+university's acceptable-use policy before using any automation with your student account.
+This project is not affiliated with or endorsed by Syracuse University or
+Anthology/Blackboard.
 
-- **Check your institution's acceptable-use policy** before using automated tooling against
-  your student account. This project is not affiliated with or endorsed by Syracuse University
-  or Anthology/Blackboard.
-- **Keep request volume low.** The server caches aggressively, paces requests, and caps page
-  counts — don't defeat those guards.
-- **Your session, your responsibility.** Everything the agent can read is exactly what you can
-  read in a browser. Never point the agent at data you shouldn't see, and never share your
-  `~/.blackboard-mcp` directory — it contains your live session.
+---
 
-## Compatibility
+## For the technically curious
 
-Built and tested against **Syracuse University's Blackboard Ultra deployment** (August 2026).
-Other institutions' Learn instances expose the same Learn REST API, but hostnames, the SSO
-entry URL, paging limits, and response details differ. To adapt: set `BB_BASE_URL` (and
-`BB_SSO_ENTRY_URL` if your school uses a SAML entry like Syracuse's), adjust
-`BLACKBOARD_HOSTS` in `src/blackboard/hosts.ts`, and run `npm run discover` to verify
-endpoints against your deployment before trusting the parsers.
+<details>
+<summary><strong>Click to expand: architecture, configuration, and developer notes</strong></summary>
+
+- **Stack**: TypeScript (ESM), Node 20+, Playwright (Chrome channel, dedicated profile),
+  official MCP TypeScript SDK over stdio, Zod, Vitest.
+- **Architecture**: MCP tool handlers call a Blackboard service layer; requests run as
+  same-origin `fetch`es from a page on the Blackboard host, so they're identical to what the
+  Ultra web app itself sends. Both `blackboard.syr.edu` and `blackboard.syracuse.edu`
+  (separate cookie domains) are supported; the working origin is persisted.
+- **Session resilience**: Learn's session cookie doesn't survive browser restarts, so the
+  authenticated cookie set is snapshotted to `~/.blackboard-mcp/browser-state.json` (mode
+  0600) and restored on launch; while the institution's SSO session lasts, the SAML entry is
+  followed silently to re-establish Blackboard access with zero interaction.
+- **Data sources** (verified against Syracuse's deployment, Aug 2026):
+  `users/me`, `users/{id}/courses?expand=course`, course contents (flat listings with
+  `parentId`; file data on `contentHandler.file`), course announcements, the Ultra calendar
+  (`calendars/items`), and the v2 gradebook (`columns`, `columns/{id}/users/me`; due dates at
+  `grading.due`, points at `score.possible`). Paging is capped at 100. Attachment downloads
+  follow the item's `rel=alternate` `/ultra/redirect` link (the content-files endpoints 404
+  on this deployment).
+- **Tools**: `list_courses`, `get_course_content`, `get_announcements`, `get_assignments`,
+  `get_grades`, `get_attachment`, `get_upcoming_work`, `get_recent_updates`,
+  `get_assignment_context`. All annotated read-only; errors are short coded messages
+  (`BLACKBOARD_SESSION_EXPIRED`, `COURSE_NOT_FOUND`, `PERMISSION_DENIED`, ...) with sensitive
+  values masked.
+- **Caching**: in-process TTLs (courses 10 min, most else 5 min), 150–200 ms courtesy delays
+  between paged requests, hard caps on pages/items, and the shared browser closes after 5
+  idle minutes.
+- **Configuration**: `BB_BROWSER_CHANNEL` (default `chrome`), `BB_HEADLESS=0` to watch the
+  browser work, `BLACKBOARD_MCP_HOME` (default `~/.blackboard-mcp`), `BB_BASE_URL` and
+  `BB_SSO_ENTRY_URL` for other institutions (also update `BLACKBOARD_HOSTS` in
+  `src/blackboard/hosts.ts`).
+- **Development**: `npm run typecheck`, `npm test` (63 tests, all network mocked — live
+  checks are never part of the suite), `npm run build`, `npm start`.
+- **Endpoint discovery**: `npm run discover` opens the dedicated browser and records every
+  Blackboard API call your normal clicking makes, so parsers can be verified against real
+  traffic instead of guesses.
+- **Compatibility**: built for Syracuse University's Blackboard Ultra (Aug 2026). Other
+  schools: same Learn REST API, but set `BB_BASE_URL`/`BB_SSO_ENTRY_URL`, adjust
+  `BLACKBOARD_HOSTS`, and verify with `npm run discover`. Windows untested.
+
+</details>
 
 ## License
 
-[MIT](LICENSE) — use it, fork it, fix it.
+[MIT](LICENSE) — free to use, study, and improve. Made for students, by a student.

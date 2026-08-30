@@ -16,6 +16,8 @@ export interface Course {
   endDate?: string;
   available: boolean;
   url?: string;
+  /** When the student last opened the course (from enrollment data). */
+  lastAccessed?: string;
 }
 
 export type ContentItemType =

@@ -52,6 +52,8 @@ export function normalizeCourse(raw: unknown, enrollment?: unknown): Course {
   };
   const role = enrollment ? strField(enrollment, 'courseRoleId') : undefined;
   if (role) course.role = role;
+  const lastAccessed = toIso(getField(enrollment, 'lastAccessed'));
+  if (lastAccessed) course.lastAccessed = lastAccessed;
   const organization = rec.organization === true;
   course.url = organization
     ? `https://blackboard.syr.edu/ultra/organizations/${id}/outline`

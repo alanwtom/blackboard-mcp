@@ -11,7 +11,7 @@ import type { ContentItem } from '../blackboard/types.js';
 import { isoOrNow, parseBBDate, sleep, titlesMatch } from '../blackboard/util.js';
 import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
 
-const MAX_COURSES_FOR_SWEEPS = 12;
+const MAX_COURSES_FOR_SWEEPS = 20;
 
 export function registerStudentTools(server: McpServer, ctx: BBToolContext): void {
   server.registerTool(
@@ -76,7 +76,17 @@ export function registerStudentTools(server: McpServer, ctx: BBToolContext): voi
         const result = await ctx.callBB(async (http) => {
           const since = isoOrNow(args.since);
           const sinceIso = since.toISOString();
-          const courses = (await listCourses(http)).slice(0, MAX_COURSES_FOR_SWEEPS);
+          // Sweep the most recently accessed courses first: with many old
+          // enrollments, alphabetical order would waste the cap on courses
+          // the student hasn't opened in years.
+          const allCourses = await listCourses(http);
+          const courses = [...allCourses]
+            .sort(
+              (a, b) => (b.lastAccessed ?? '').localeCompare(a.lastAccessed ?? ''),
+            )
+            .slice(0, MAX_COURSES_FOR_SWEEPS);
+          // Keep the original ordering for the response metadata.
+          void allCourses;
 
           const announcements: Array<Record<string, unknown>> = [];
           const newContent: Array<Record<string, unknown>> = [];

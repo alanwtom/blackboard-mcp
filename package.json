@@ -1,0 +1,35 @@
+{
+  "name": "blackboard-mcp",
+  "version": "0.1.0",
+  "description": "Local-first, read-only Blackboard MCP server for the signed-in student (Syracuse University)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "blackboard-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "login": "npm run -s build && node dist/cli/login.js",
+    "status": "npm run -s build && node dist/cli/status.js",
+    "courses": "npm run -s build && node dist/cli/courses.js",
+    "discover": "npm run -s build && node dist/cli/discover.js",
+    "logout": "npm run -s build && node dist/cli/logout.js",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "playwright": "^1.54.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -63,6 +63,10 @@ export class FakeHttp implements BBHttp {
     const u = new URL(href, 'https://blackboard.syr.edu');
     return `${u.pathname}${u.search}`;
   }
+
+  async captureRedirectDownload(pathOrUrl: string): Promise<BBBufferResponse> {
+    return this.fetchBuffer(pathOrUrl);
+  }
 }
 
 // ---------------------------------------------------------------------------

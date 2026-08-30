@@ -38,6 +38,8 @@ export interface AttachmentRef {
   fileId?: string;
   courseId: string;
   contentId: string;
+  /** Parent content id, needed to rebuild /ultra/redirect links. */
+  parentId?: string;
   fileName?: string;
   mimeType?: string;
   sizeBytes?: number;

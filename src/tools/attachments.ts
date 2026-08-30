@@ -27,7 +27,7 @@ export function registerAttachmentTools(server: McpServer, ctx: BBToolContext): 
         // Preferred path: the content listing already carries handler
         // attachment data (name, type, and the /ultra/redirect download link).
         const items = await ctx.callBB((http) =>
-          getCourseContent(http, course.id, { depth: 1, maxItems: 400 }),
+          getCourseContent(http, course.id, { depth: 3, maxItems: 400 }),
         );
         const item = items.find((i) => i.id === args.content_id);
         const refs = item?.attachments ?? [];

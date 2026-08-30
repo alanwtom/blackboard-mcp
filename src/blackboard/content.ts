@@ -61,6 +61,7 @@ export function normalizeContentItem(raw: unknown, courseId: string): ContentIte
     item.attachments.push({
       courseId,
       contentId: id,
+      parentId: item.parentId,
       fileName,
       mimeType: strField(rec, 'contentHandler.file.mimeType'),
       url: altHref,
@@ -120,27 +121,35 @@ export async function getCourseContent(http: BBHttp, courseId: string, opts: Get
     const all: ContentItem[] = await fetchLevel(opts.folderId);
     if (all.length > maxItems) all.length = maxItems;
 
-    // Ultra listings are flat: every item carries parentId and children are
-    // already included. Only expand via extra requests for deployments that
-    // return roots only (no parentIds) — and never for explicit folder views.
-    const flatListing = !opts.folderId && all.some((i) => i.parentId !== undefined);
-    if (!flatListing) {
-      const queue: { folder: ContentItem; level: number }[] = all
-        .filter((i) => i.type === 'folder' && i.hasChildren)
-        .map((folder) => ({ folder, level: 1 }));
+    // Gap-filling expansion. Some Ultra listings are fully flat (children
+    // included), others list only top-level folders; and a single course can
+    // mix both. For every folder whose children are NOT already present in
+    // the listing, fetch them (bounded by depth and maxItems).
+    const seenIds = new Set(all.map((i) => i.id));
+    const foldersWithChildren = new Set(
+      all.map((i) => i.parentId).filter((p): p is string => p !== undefined),
+    );
+    const queue: { folder: ContentItem; level: number }[] = all
+      .filter(
+        (i) =>
+          i.type === 'folder' &&
+          i.hasChildren &&
+          !foldersWithChildren.has(i.id),
+      )
+      .map((folder) => ({ folder, level: 1 }));
 
-      while (queue.length > 0 && all.length < maxItems) {
-        const { folder, level } = queue.shift() as { folder: ContentItem; level: number };
-        if (level >= depth) continue;
-        await sleep(150);
-        const children = await fetchLevel(folder.id);
-        for (const child of children) {
-          if (all.length >= maxItems) break;
-          if (all.some((existing) => existing.id === child.id)) continue;
-          all.push(child);
-          if (child.type === 'folder' && child.hasChildren) {
-            queue.push({ folder: child, level: level + 1 });
-          }
+    while (queue.length > 0 && all.length < maxItems) {
+      const { folder, level } = queue.shift() as { folder: ContentItem; level: number };
+      if (level >= depth) continue;
+      await sleep(150);
+      const children = await fetchLevel(folder.id);
+      for (const child of children) {
+        if (all.length >= maxItems) break;
+        if (seenIds.has(child.id)) continue;
+        seenIds.add(child.id);
+        all.push(child);
+        if (child.type === 'folder' && child.hasChildren) {
+          queue.push({ folder: child, level: level + 1 });
         }
       }
     }

@@ -49,6 +49,8 @@ export interface BBHttp {
   fetchBuffer(pathOrUrl: string): Promise<BBBufferResponse>;
   /** Normalize a returned pagination href to a same-origin path. */
   toSameOriginPath(href: string): string;
+  /** Resolve an /ultra/redirect link through the real page and capture the file. */
+  captureRedirectDownload(pathOrUrl: string, timeoutMs?: number): Promise<BBBufferResponse>;
 }
 
 interface EvaluateResult {
@@ -453,6 +455,96 @@ export class BlackboardSession implements BBHttp {
       bytes,
       filename: parseContentDispositionFilename(headers['content-disposition']),
     };
+  }
+
+  /**
+   * Resolve an /ultra/redirect content link by letting the Ultra SPA perform
+   * its own redirect in the authenticated page and capturing the resulting
+   * bbcswebdav file response. The target URL only exists at runtime; static
+   * fetching returns the SPA shell instead of the file.
+   */
+  async captureRedirectDownload(pathOrUrl: string, timeoutMs = 30_000): Promise<BBBufferResponse> {
+    await this.ensureWorker();
+    // A fresh page per download: no in-flight requests or cached viewer
+    // responses can leak from one capture into the next.
+    const page = await this.context.newPage();
+    // Results land in an array because the assignment happens inside a
+    // response callback; arrays also avoid control-flow narrowing issues.
+    const results: BBBufferResponse[] = [];
+    const typedHandler = (response: import('playwright').Response): void => {
+      void (async () => {
+        try {
+          // The download is a redirect chain (bbcswebdav hops, then the
+          // storage CDN). Capture the first 200 that carries file content,
+          // skipping the intermediate hops (which may 302 or 404 per host).
+          const u = response.url();
+          if (response.status() !== 200) return;
+          const headers = response.headers();
+          const ct = headers['content-type'] ?? '';
+          // Skip UI noise: the redirect page fires API calls (JSON) and HTML
+          // fragments before the real file arrives from the storage CDN.
+          if (ct.includes('text/html') || ct.includes('json')) return;
+          const hasDisposition = /attachment/i.test(headers['content-disposition'] ?? '');
+          const looksLikeFile =
+            hasDisposition || ct.includes('pdf') || ct.includes('octet-stream');
+          if (!looksLikeFile) return;
+          const bytes = await response.body();
+          if (bytes.length < 1024) return; // error stubs are tiny
+          if (process.env.BB_DEBUG === '1') {
+            console.error(`[bb-debug] captured ${bytes.length}b ${ct} from ${u.slice(0, 110)}`);
+          }
+          results.push({
+            status: response.status(),
+            contentType: headers['content-type'] ?? null,
+            bytes,
+            filename: parseContentDispositionFilename(headers['content-disposition']),
+          });
+        } catch {
+          /* response may vanish on navigation; the timeout handles it */
+        }
+      })();
+    };
+    page.on('response', typedHandler);
+    const debug = process.env.BB_DEBUG === '1';
+    try {
+      // The webdav file store is per-hostname; try each Blackboard host until
+      // one resolves the link to an actual file.
+      const redirectUrl = new URL(pathOrUrl, BASE_URL);
+      const redirectPath = `${redirectUrl.pathname}${redirectUrl.search}`;
+      for (const origin of this.probeOrigins()) {
+        results.length = 0;
+        if (debug) console.error(`[bb-debug] trying ${origin}${redirectPath.slice(0, 60)}`);
+        await page
+          .goto(`${origin}${redirectPath}`, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+          .catch(() => undefined);
+        const deadline = Date.now() + timeoutMs;
+        while (results.length === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        if (results.length > 0) {
+          if (debug) {
+            console.error(`[bb-debug] captured ${results[0].status} ${results[0].contentType} ${results[0].bytes.length}b`);
+          }
+          break;
+        }
+        if (debug) console.error(`[bb-debug] no file from ${origin} (page at ${page.url().slice(0, 90)})`);
+      }
+    } finally {
+      page.off('response', typedHandler);
+      await page.close().catch(() => undefined);
+    }
+    const result: BBBufferResponse | undefined = results[0];
+    if (!result) {
+      throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Download link did not resolve to a file in time.');
+    }
+    if (result.status !== 200) {
+      throw new BlackboardError(
+        result.status === 404 ? 'ATTACHMENT_NOT_FOUND' : 'BLACKBOARD_REQUEST_FAILED',
+        `Attachment download failed (HTTP ${result.status}).`,
+        { status: result.status },
+      );
+    }
+    return result;
   }
 
   /** Enforce same-origin so this session can never be used as a generic proxy. */

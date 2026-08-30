@@ -184,10 +184,21 @@ export async function downloadAttachmentRef(
   ref: AttachmentRef,
   opts: { fileName?: string; subfolder?: string } = {},
 ): Promise<AttachmentSaveResult> {
-  if (!ref.url) {
+  let url = ref.url;
+  if (!url && ref.courseId && ref.contentId) {
+    // Folder-expanded items and files-api refs omit the links array; the
+    // redirect pattern is stable, so rebuild it from the ids.
+    const parent = ref.parentId ? `&parentId=${encodeURIComponent(ref.parentId)}` : '';
+    url = `/ultra/redirect?redirectType=nautilus&courseId=${encodeURIComponent(ref.courseId)}&contentId=${encodeURIComponent(ref.contentId)}${parent}`;
+  }
+  if (!url) {
     throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Attachment has no downloadable URL.');
   }
-  const resp = await http.fetchBuffer(ref.url);
+  // /ultra/redirect links resolve through the Ultra SPA at runtime; let the
+  // authenticated page follow it and capture the file response.
+  const resp = url.includes('/ultra/redirect')
+    ? await http.captureRedirectDownload(url)
+    : await http.fetchBuffer(url);
   if (resp.status !== 200) {
     throw new BlackboardError(
       resp.status === 404 ? 'ATTACHMENT_NOT_FOUND' : 'BLACKBOARD_REQUEST_FAILED',

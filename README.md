@@ -22,67 +22,33 @@ Not sure if you have Node.js? Open Terminal (Cmd + Space, type "Terminal", press
 
 ## Setup (do once)
 
-Open Terminal and run each command, one at a time.
-
-**1. Download the project**
+Open Terminal and run three commands, one at a time.
 
 ```bash
 cd ~/Documents/Github
 git clone https://github.com/alanwtom/blackboard-mcp.git
 cd blackboard-mcp
-```
-
-If your Mac says `git` is not installed, agree to install it, then run the command again.
-
-**2. Install the pieces**
-
-```bash
 npm install
+npm run setup
 ```
 
-Scrolling text is normal. This takes a minute or two.
+(`npm install` shows scrolling text for a minute or two; that is normal. If your Mac says
+`git` is not installed, agree to install it, then run the commands again.)
 
-**3. Log in to Blackboard**
+`npm run setup` is a friendly wizard that:
 
-```bash
-npm run login
-```
+1. Checks you have everything (Node.js, Chrome, the project build)
+2. Connects Claude Desktop (and Claude Code) for you, with your permission
+3. Checks your Blackboard session and opens a Chrome window to log in if needed
+4. Confirms everything works
 
-A Chrome window opens. Sign in with your NetID and approve Duo, exactly like usual. Use the
-new window with the red banner, not your usual Chrome browser. When you land back on
-Blackboard, the window closes by itself. Your password and Duo codes are never seen or saved
-by this project: that part is always you typing in a real browser.
+For the login step, use the Chrome window with the red banner (not your usual Chrome
+browser). Sign in with your NetID and approve Duo exactly like usual. Your password and Duo
+codes are never seen or saved by this project: that part is always you typing in a real
+browser.
 
-**4. Check that it worked**
-
-```bash
-npm run courses
-```
-
-You should see your real course list.
-
-**5. Connect it to your AI app**
-
-For Claude Desktop: open Settings, then Developer, then Edit Config, and add this block:
-
-```json
-{
-  "mcpServers": {
-    "blackboard": {
-      "command": "node",
-      "args": ["/Users/yourname/Documents/Github/blackboard-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-Replace `yourname` with your Mac username. To check the exact path, run:
-
-```bash
-echo ~/Documents/Github/blackboard-mcp/dist/index.js
-```
-
-Save the file, quit Claude Desktop completely (Cmd + Q), and reopen it.
+When the wizard says everything is ready, quit and reopen your AI app, and you are done.
+Prefer doing these steps by hand? The manual way is described at the bottom of this page.
 
 ## Use it
 
@@ -121,6 +87,58 @@ saved in `~/.blackboard-mcp/downloads`.
 Use it for yourself at a human pace, and check your university's acceptable-use policy
 before using any automation with your student account. Not affiliated with or endorsed by
 Syracuse University or Anthology/Blackboard.
+
+## Manual setup (if you prefer doing it by hand)
+
+<details>
+<summary><strong>Click to expand: the manual steps</strong></summary>
+
+1. **Build the project**
+
+```bash
+npm install
+npm run build
+```
+
+2. **Log in to Blackboard**
+
+```bash
+npm run login
+```
+
+A Chrome window opens with a red banner. Sign in with your NetID and approve Duo there. When
+you land back on Blackboard, the window closes by itself.
+
+3. **Check that it worked**
+
+```bash
+npm run courses
+```
+
+4. **Connect your AI app**
+
+For Claude Desktop: open Settings, then Developer, then Edit Config, and add this block
+inside the outer braces:
+
+```json
+"mcpServers": {
+  "blackboard": {
+    "command": "node",
+    "args": ["/Users/yourname/Documents/Github/blackboard-mcp/dist/index.js"]
+  }
+}
+```
+
+Replace `yourname` with your Mac username. To check the exact path, run:
+
+```bash
+echo ~/Documents/Github/blackboard-mcp/dist/index.js
+```
+
+Save the file, quit Claude Desktop completely (Cmd + Q), and reopen it. For Claude Code,
+run: `claude mcp add blackboard -- node /path/to/blackboard-mcp/dist/index.js`
+
+</details>
 
 ## For the technically curious
 

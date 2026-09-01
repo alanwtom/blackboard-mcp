@@ -20,7 +20,8 @@
     "logout": "npm run -s build && node dist/cli/logout.js",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "setup": "npm install --no-fund --no-audit && tsc -p tsconfig.json && node dist/cli/setup.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

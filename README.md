@@ -8,6 +8,8 @@ read-only: it can never submit, post, message, or change anything.
 Setup takes about ten minutes and you only do it once. If you have never used a terminal,
 just copy and paste each command exactly as written.
 
+![Asking about course readings and getting a summary pulled straight from Blackboard](docs/example-conversation.png)
+
 ## What you need
 
 1. A Mac (this guide is for macOS)

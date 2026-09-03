@@ -49,14 +49,17 @@ export class FakeHttp implements BBHttp {
     };
   }
 
+  /** Overrides the bytes both fetch paths return, for size/failure cases. */
+  public bufferReply: (pathOrUrl: string) => BBBufferResponse = () => ({
+    status: 200,
+    contentType: 'application/pdf',
+    bytes: Buffer.from('%PDF-1.4 fake'),
+    filename: 'downloaded.pdf',
+  });
+
   async fetchBuffer(pathOrUrl: string): Promise<BBBufferResponse> {
     this.requests.push(`BUFFER ${pathOrUrl}`);
-    return {
-      status: 200,
-      contentType: 'application/pdf',
-      bytes: Buffer.from('%PDF-1.4 fake'),
-      filename: 'downloaded.pdf',
-    };
+    return this.bufferReply(pathOrUrl);
   }
 
   toSameOriginPath(href: string): string {
@@ -65,7 +68,8 @@ export class FakeHttp implements BBHttp {
   }
 
   async captureRedirectDownload(pathOrUrl: string): Promise<BBBufferResponse> {
-    return this.fetchBuffer(pathOrUrl);
+    this.requests.push(`CAPTURE ${pathOrUrl}`);
+    return this.bufferReply(pathOrUrl);
   }
 }
 

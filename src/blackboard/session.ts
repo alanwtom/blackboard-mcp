@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from 'playwright';
 import { launchBrowser } from './browser.js';
-import { BlackboardError, truncate } from './errors.js';
-import { isBlackboardHost, BLACKBOARD_HOSTS } from './hosts.js';
+import { BlackboardError, isBlackboardError, truncate } from './errors.js';
+import { isBlackboardHost, isDownloadHost, BLACKBOARD_HOSTS } from './hosts.js';
 import type { BBIdentity } from './types.js';
 import { readMeta, writeMeta, loadCookies, saveCookies } from '../storage/session-store.js';
 
@@ -65,6 +65,54 @@ function looksLikeLoginPage(url: URL): boolean {
   if (!isBlackboardHost(url)) return true;
   const p = url.pathname;
   return p.startsWith('/webapps/login') || p.startsWith('/login') || p === '/ultra/session-expired';
+}
+
+/**
+ * Hard ceiling on a single attachment. Shared with the attachment writer so
+ * the limit is enforced once on the declared size (before buffering) and once
+ * on the real size (after), rather than drifting between the two.
+ */
+export const MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024;
+
+/**
+ * How long the page may sit idle before we conclude a download link is never
+ * going to resolve. Progress resets it, so this is a quiet period, not a
+ * deadline — see the wait loop in resolveDownloadUrls.
+ */
+const RESOLVE_QUIET_MS = 6_000;
+
+/** Ceiling on one hostname, for a page that keeps chattering without resolving. */
+const ORIGIN_CAP_MS = 25_000;
+
+/**
+ * True when a URL is the file itself rather than an app or API route.
+ *
+ * Blackboard's own hostnames serve the whole web app, and some of its API
+ * endpoints (telemetry, in particular) answer with a file-ish content type —
+ * so on those hosts only /bbcswebdav/ is ever a real attachment. Anything
+ * else has to be on the content CDN, which serves nothing but files.
+ */
+export function isFileCandidateUrl(url: URL): boolean {
+  if (!isDownloadHost(url)) return false;
+  if (isBlackboardHost(url)) return url.pathname.startsWith('/bbcswebdav/');
+  return true;
+}
+
+/**
+ * Whether a request the page is about to make is the attachment link itself.
+ *
+ * The decisive test is `isNavigation`. The file is always a main-frame
+ * navigation; everything else the page pulls in is noise — and that noise is
+ * not distinguishable by content type, because the Ultra error page serves its
+ * campus banner from the same CDN with `Content-Disposition: inline;
+ * filename=...`. Without the navigation check a failed download quietly
+ * yields a PNG of the quad instead of an error.
+ *
+ * Pure, so the rule is testable without driving a browser.
+ */
+export function isFileNavigation(r: { isNavigation: boolean; url: URL }): boolean {
+  if (!r.isNavigation) return false;
+  return isFileCandidateUrl(r.url);
 }
 
 function parseContentDispositionFilename(header: string | undefined): string | undefined {
@@ -458,93 +506,165 @@ export class BlackboardSession implements BBHttp {
   }
 
   /**
-   * Resolve an /ultra/redirect content link by letting the Ultra SPA perform
-   * its own redirect in the authenticated page and capturing the resulting
-   * bbcswebdav file response. The target URL only exists at runtime; static
-   * fetching returns the SPA shell instead of the file.
+   * Resolve an /ultra/redirect content link and return the file's bytes.
+   *
+   * The link only exists at runtime: fetching it statically returns the Ultra
+   * SPA shell, so the page has to follow it. But the page must not be allowed
+   * to actually *load* the file it lands on. Two separate things go wrong if
+   * it does:
+   *
+   *   - Reading the bytes back out of the response fails for anything large.
+   *     Chromium buffers response bodies in a bounded "inspector cache" and
+   *     evicts big ones, so response.body() throws "Request content was
+   *     evicted from inspector cache" on exactly the big lecture decks this
+   *     matters for.
+   *   - Worse, a file served as an attachment becomes a browser download,
+   *     which closes the tab — and on a persistent context that tears down
+   *     the whole browser mid-call.
+   *
+   * So we intercept instead: watch for the main-frame navigation to the file,
+   * record its URL, and abort it before a byte is transferred. Then fetch that
+   * URL over HTTP through the same cookie jar, where there is no size ceiling
+   * and nothing to race.
    */
-  async captureRedirectDownload(pathOrUrl: string, timeoutMs = 30_000): Promise<BBBufferResponse> {
-    await this.ensureWorker();
-    // A fresh page per download: no in-flight requests or cached viewer
-    // responses can leak from one capture into the next.
-    const page = await this.context.newPage();
-    // Results land in an array because the assignment happens inside a
-    // response callback; arrays also avoid control-flow narrowing issues.
-    const results: BBBufferResponse[] = [];
-    const typedHandler = (response: import('playwright').Response): void => {
-      void (async () => {
-        try {
-          // The download is a redirect chain (bbcswebdav hops, then the
-          // storage CDN). Capture the first 200 that carries file content,
-          // skipping the intermediate hops (which may 302 or 404 per host).
-          const u = response.url();
-          if (response.status() !== 200) return;
-          const headers = response.headers();
-          const ct = headers['content-type'] ?? '';
-          // Skip UI noise: the redirect page fires API calls (JSON) and HTML
-          // fragments before the real file arrives from the storage CDN.
-          if (ct.includes('text/html') || ct.includes('json')) return;
-          const hasDisposition = /attachment/i.test(headers['content-disposition'] ?? '');
-          const looksLikeFile =
-            hasDisposition || ct.includes('pdf') || ct.includes('octet-stream');
-          if (!looksLikeFile) return;
-          const bytes = await response.body();
-          if (bytes.length < 1024) return; // error stubs are tiny
-          if (process.env.BB_DEBUG === '1') {
-            console.error(`[bb-debug] captured ${bytes.length}b ${ct} from ${u.slice(0, 110)}`);
-          }
-          results.push({
-            status: response.status(),
-            contentType: headers['content-type'] ?? null,
-            bytes,
-            filename: parseContentDispositionFilename(headers['content-disposition']),
-          });
-        } catch {
-          /* response may vanish on navigation; the timeout handles it */
+  async captureRedirectDownload(pathOrUrl: string, timeoutMs = 45_000): Promise<BBBufferResponse> {
+    const fileUrls = await this.resolveDownloadUrls(pathOrUrl, timeoutMs);
+
+    // "Too large" is a real answer about the file, not a failed strategy —
+    // hold it and report it rather than falling through to "not found".
+    let sizeRefusal: unknown = null;
+    for (const url of fileUrls) {
+      const fetched = await this.fetchDownloadUrl(url).catch((err: unknown) => {
+        if (isBlackboardError(err) && err.code === 'CONTENT_NOT_AVAILABLE') sizeRefusal = err;
+        return null;
+      });
+      if (fetched && fetched.status === 200 && fetched.bytes.length > 0) {
+        if (process.env.BB_DEBUG === '1') {
+          console.error(`[bb-debug] fetched ${fetched.bytes.length}b from ${url.slice(0, 100)}`);
         }
-      })();
-    };
-    page.on('response', typedHandler);
+        return fetched;
+      }
+    }
+    if (sizeRefusal) throw sizeRefusal;
+
+    throw new BlackboardError(
+      'ATTACHMENT_NOT_FOUND',
+      'Download link did not resolve to a file. The item may have been removed, or it may not be a downloadable attachment.',
+    );
+  }
+
+  /**
+   * Drive the SPA until it points the main frame at the file, collecting the
+   * link(s) it aims for without letting any of them load.
+   */
+  private async resolveDownloadUrls(pathOrUrl: string, timeoutMs: number): Promise<string[]> {
+    await this.ensureWorker();
+    // A fresh page per download so no in-flight request from one capture can
+    // leak into the next.
+    const page = await this.context.newPage();
     const debug = process.env.BB_DEBUG === '1';
+    const fileUrls: string[] = [];
+
+    // How long the page has been doing nothing. Waiting a fixed number of
+    // seconds does not work for both cases at once: a course item resolves in
+    // about two seconds, while an organization site runs several LTI launches
+    // and an OAuth handshake first and only reaches the file around ten. So
+    // wait for as long as the page is still making requests, and give up once
+    // it falls quiet.
+    let lastActivity = Date.now();
+    page.on('request', () => {
+      lastActivity = Date.now();
+    });
+
+    await page.route('**/*', async (route, request) => {
+      lastActivity = Date.now();
+      try {
+        if (isFileNavigation({ isNavigation: request.isNavigationRequest(), url: new URL(request.url()) })) {
+          if (!fileUrls.includes(request.url())) {
+            fileUrls.push(request.url());
+            if (debug) console.error(`[bb-debug] file link ${request.url().slice(0, 110)}`);
+          }
+          // Abort rather than continue: loading it here would start a download
+          // and take the browser down with it.
+          await route.abort();
+          return;
+        }
+      } catch {
+        /* unparseable URL — treat as ordinary traffic */
+      }
+      await route.continue().catch(() => undefined);
+    });
+
     try {
-      // The webdav file store is per-hostname; try each Blackboard host until
-      // one resolves the link to an actual file.
       const redirectUrl = new URL(pathOrUrl, BASE_URL);
       const redirectPath = `${redirectUrl.pathname}${redirectUrl.search}`;
+      const overallDeadline = Date.now() + timeoutMs;
+
+      // The webdav file store is per-hostname; try each Blackboard host until
+      // one resolves the link.
       for (const origin of this.probeOrigins()) {
-        results.length = 0;
+        const remaining = overallDeadline - Date.now();
+        if (remaining <= 0) break;
         if (debug) console.error(`[bb-debug] trying ${origin}${redirectPath.slice(0, 60)}`);
         await page
-          .goto(`${origin}${redirectPath}`, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+          .goto(`${origin}${redirectPath}`, {
+            waitUntil: 'domcontentloaded',
+            timeout: Math.min(30_000, remaining),
+          })
           .catch(() => undefined);
-        const deadline = Date.now() + timeoutMs;
-        while (results.length === 0 && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 500));
+
+        // Wait while the page is still working, and stop once it goes quiet —
+        // a dead link stops making requests, so this gives up promptly without
+        // cutting off a slow-but-progressing resolve. ORIGIN_CAP_MS bounds the
+        // pathological case of a page that never stops chattering.
+        lastActivity = Date.now();
+        const originDeadline = Math.min(Date.now() + ORIGIN_CAP_MS, overallDeadline);
+        while (
+          fileUrls.length === 0 &&
+          Date.now() < originDeadline &&
+          Date.now() - lastActivity < RESOLVE_QUIET_MS
+        ) {
+          await new Promise((r) => setTimeout(r, 250));
         }
-        if (results.length > 0) {
-          if (debug) {
-            console.error(`[bb-debug] captured ${results[0].status} ${results[0].contentType} ${results[0].bytes.length}b`);
-          }
-          break;
-        }
-        if (debug) console.error(`[bb-debug] no file from ${origin} (page at ${page.url().slice(0, 90)})`);
+        if (fileUrls.length > 0) break;
+        if (debug) console.error(`[bb-debug] nothing from ${origin} (page at ${page.url().slice(0, 90)})`);
       }
     } finally {
-      page.off('response', typedHandler);
       await page.close().catch(() => undefined);
     }
-    const result: BBBufferResponse | undefined = results[0];
-    if (!result) {
-      throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Download link did not resolve to a file in time.');
+    return fileUrls;
+  }
+
+  /**
+   * Fetch a resolved download link through the context's request API, which
+   * shares the browser's cookie jar. May be cross-origin (the content CDN), so
+   * the host is re-checked against the allowlist here as well.
+   */
+  private async fetchDownloadUrl(url: string): Promise<BBBufferResponse> {
+    const parsed = new URL(url);
+    if (!isFileCandidateUrl(parsed)) {
+      throw new BlackboardError('INVALID_INPUT', `Refusing to fetch a download from ${parsed.hostname}${parsed.pathname}.`);
     }
-    if (result.status !== 200) {
+    const res = await this.context.request.get(url, { timeout: 180_000 });
+    const headers = res.headers();
+    const declared = Number(headers['content-length'] ?? '');
+    if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
       throw new BlackboardError(
-        result.status === 404 ? 'ATTACHMENT_NOT_FOUND' : 'BLACKBOARD_REQUEST_FAILED',
-        `Attachment download failed (HTTP ${result.status}).`,
-        { status: result.status },
+        'CONTENT_NOT_AVAILABLE',
+        `Attachment is too large to download (${Math.round(declared / 1024 / 1024)} MB, limit ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB).`,
       );
     }
-    return result;
+    // An expired or unauthorized link comes back as an HTML page rather than a
+    // 4xx, so treat HTML as "not the file" and let the caller move on.
+    if ((headers['content-type'] ?? '').includes('text/html')) {
+      throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Download URL returned a page instead of a file.');
+    }
+    return {
+      status: res.status(),
+      contentType: headers['content-type'] ?? null,
+      bytes: await res.body(),
+      filename: parseContentDispositionFilename(headers['content-disposition']),
+    };
   }
 
   /** Enforce same-origin so this session can never be used as a generic proxy. */

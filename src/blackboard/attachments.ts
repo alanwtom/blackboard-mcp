@@ -2,7 +2,7 @@ import { globalCache, TTL } from './cache.js';
 import { BlackboardError, truncate } from './errors.js';
 import { isBlackboardHost } from './hosts.js';
 import { getJson } from './transport.js';
-import type { BBHttp } from './session.js';
+import { MAX_DOWNLOAD_BYTES, type BBHttp } from './session.js';
 import type { AttachmentRef, AttachmentSaveResult } from './types.js';
 import { asRecord, htmlToText, numField, strField } from './util.js';
 import { paths } from '../storage/session-store.js';
@@ -11,7 +11,6 @@ import path from 'node:path';
 
 const API = '/learn/api/public/v1';
 
-const MAX_ATTACHMENT_BYTES = 200 * 1024 * 1024;
 const TEXT_EXCERPT_MAX_BYTES = 256 * 1024;
 const TEXT_EXCERPT_CHARS = 4000;
 
@@ -206,8 +205,13 @@ export async function downloadAttachmentRef(
       { status: resp.status },
     );
   }
-  if (resp.bytes.length > MAX_ATTACHMENT_BYTES) {
-    throw new BlackboardError('CONTENT_NOT_AVAILABLE', 'Attachment is too large to download (over 200 MB).');
+  // Backstop: the fetch layer already refuses anything whose declared size is
+  // over the ceiling, but a response without Content-Length gets here unchecked.
+  if (resp.bytes.length > MAX_DOWNLOAD_BYTES) {
+    throw new BlackboardError(
+      'CONTENT_NOT_AVAILABLE',
+      `Attachment is too large to download (over ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB).`,
+    );
   }
 
   const rawName = opts.fileName ?? ref.fileName ?? resp.filename ?? `attachment-${ref.contentId}`;

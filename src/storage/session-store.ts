@@ -9,7 +9,12 @@ import path from 'node:path';
  * into other files, and are never exposed through MCP or logs.
  */
 export function blackboardHome(): string {
-  return process.env.BLACKBOARD_MCP_HOME ?? path.join(os.homedir(), '.blackboard-mcp');
+  // An override that is present but blank must not be honoured: `??` would
+  // accept "" and every path below would become relative, writing the cookie
+  // snapshot into whatever directory the command happened to run from.
+  const override = process.env.BLACKBOARD_MCP_HOME?.trim();
+  if (override) return path.resolve(override);
+  return path.join(os.homedir(), '.blackboard-mcp');
 }
 
 export const paths = {
@@ -78,7 +83,9 @@ export async function writeMeta(patch: SessionMeta): Promise<SessionMeta> {
  * verification. Blackboard's session cookie does not survive a browser
  * restart, so this file carries the session between runs. It is just as
  * sensitive as the profile's own cookie store: local-only under
- * ~/.blackboard-mcp, 0600 permissions, gitignored, never exposed through MCP.
+ * ~/.blackboard-mcp, gitignored, never exposed through MCP. The 0600 mode
+ * applies on macOS and Linux; Windows ignores POSIX modes and instead relies
+ * on the per-user ACL that already protects C:\Users\<name>.
  */
 export interface StoredCookie {
   name: string;
@@ -109,6 +116,20 @@ export async function loadCookies(): Promise<StoredCookie[]> {
 
 export async function hasStoredCookies(): Promise<boolean> {
   return (await loadCookies()).length > 0;
+}
+
+/**
+ * Whether any Blackboard session state exists on this machine.
+ *
+ * The cookie snapshot alone is enough to be signed in — the Chrome profile is
+ * a cache that gets rebuilt on first launch, not the credential. Gating on the
+ * profile directory alone therefore got both directions wrong: a student who
+ * carried their session to a new machine was told to log in again, and
+ * `logout` reported nothing to remove while leaving live cookies on disk.
+ */
+export async function hasSession(): Promise<boolean> {
+  if (await hasProfileData()) return true;
+  return hasStoredCookies();
 }
 
 /** Wipes the dedicated browser profile (logout). Requires no active browser. */

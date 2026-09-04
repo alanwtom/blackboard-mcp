@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { BlackboardSession, BASE_URL } from '../blackboard/session.js';
-import { hasProfileData, paths } from '../storage/session-store.js';
+import { hasSession, paths } from '../storage/session-store.js';
 import { runCli } from './util.js';
 
 interface SeenRequest {
@@ -18,7 +18,7 @@ interface SeenRequest {
  * what the integration should call on this deployment — never guessing.
  */
 async function main(): Promise<number> {
-  if (!(await hasProfileData())) {
+  if (!(await hasSession())) {
     process.stdout.write('No Blackboard session found. Run npm run login first.\n');
     return 1;
   }

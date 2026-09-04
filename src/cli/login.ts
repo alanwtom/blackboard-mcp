@@ -1,4 +1,5 @@
 import { BlackboardSession } from '../blackboard/session.js';
+import { paths } from '../storage/session-store.js';
 import { runCli } from './util.js';
 
 /**
@@ -49,7 +50,7 @@ async function main(): Promise<number> {
     if (tickTimer) clearInterval(tickTimer);
     const who = identity.displayName ?? identity.userName ?? 'your account';
     process.stdout.write(`\nLogin successful — signed in as ${who}.\n`);
-    process.stdout.write('Session saved in ~/.blackboard-mcp/chrome-profile.\n');
+    process.stdout.write(`Session saved in ${paths.profileDir}.\n`);
     process.stdout.write('Next: run `npm run courses` to verify, then start the MCP server with `npm start`.\n');
     return 0;
   } finally {

@@ -126,6 +126,34 @@ export async function listCourses(http: BBHttp, opts: ListCoursesOptions = {}): 
   });
 }
 
+/**
+ * Blackboard reports past-term courses as `available` and only refuses when
+ * their contents are actually requested — and it publishes no end date to
+ * distinguish them, so the enrolment listing cannot tell them apart. Once a
+ * course has definitively refused, remember that for a while: a student with
+ * years of enrolments would otherwise re-ask every locked course on every
+ * question. Only an explicit PERMISSION_DENIED counts, so a transient failure
+ * never hides a live course, and the short TTL lets access come back.
+ */
+const DENIED_TTL = 15 * 60_000;
+
+export function noteCourseDenied(courseId: string): void {
+  globalCache.set(`denied:${courseId}`, true, DENIED_TTL);
+}
+
+export function isCourseDenied(courseId: string): boolean {
+  return globalCache.get<boolean>(`denied:${courseId}`) === true;
+}
+
+/**
+ * Courses worth querying: the visible ones, minus any that recently refused.
+ * Multi-course tools should start here rather than from `listCourses`.
+ */
+export async function readableCourses(http: BBHttp, opts: ListCoursesOptions = {}): Promise<Course[]> {
+  const courses = await listCourses(http, opts);
+  return courses.filter((c) => !isCourseDenied(c.id));
+}
+
 /** Resolve a course by Blackboard id or course code; throws COURSE_NOT_FOUND. */
 export async function findCourse(http: BBHttp, courseIdOrCode: string): Promise<Course> {
   const key = courseIdOrCode.trim();

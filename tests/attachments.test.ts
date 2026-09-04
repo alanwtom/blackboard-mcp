@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll } from 'vitest';
+import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { downloadAttachment, downloadAttachmentRef, sanitizeFileName } from '../src/blackboard/attachments.js';
@@ -31,6 +32,41 @@ describe('sanitizeFileName', () => {
     const clean = sanitizeFileName(long);
     expect(clean.length).toBeLessThanOrEqual(120);
     expect(clean.endsWith('.pdf')).toBe(true);
+  });
+
+  it('replaces characters Windows cannot store in a file name', () => {
+    // A colon is the worst case: NTFS would treat the tail as an alternate
+    // data stream and hide the download on a file called "Week 3".
+    expect(sanitizeFileName('Week 3: Reading.pdf')).toBe('Week 3- Reading.pdf');
+    expect(sanitizeFileName('Q1?.docx')).toBe('Q1-.docx');
+    expect(sanitizeFileName('a*b|c<d>e"f.txt')).toBe('a-b-c-d-e-f.txt');
+  });
+
+  it('drops trailing dots and spaces that Windows silently discards', () => {
+    expect(sanitizeFileName('notes .txt')).toBe('notes .txt');
+    expect(sanitizeFileName('syllabus.')).toBe('syllabus');
+    expect(sanitizeFileName('report ')).toBe('report');
+  });
+
+  it('escapes MS-DOS device names', () => {
+    expect(sanitizeFileName('CON.txt')).toBe('_CON.txt');
+    expect(sanitizeFileName('nul')).toBe('_nul');
+    expect(sanitizeFileName('lpt1.pdf')).toBe('_lpt1.pdf');
+    // Only the exact device names are reserved.
+    expect(sanitizeFileName('console.log')).toBe('console.log');
+  });
+
+  it('produces names every supported platform accepts', async () => {
+    const dir = path.join(os.tmpdir(), `bb-mcp-names-${process.pid}`);
+    await fsp.mkdir(dir, { recursive: true });
+    const hostile = ['Week 3: Reading.pdf', 'Q1?.docx', 'a*b.txt', 'pipe|x.csv', 'quote".md', 'trailing. '];
+    for (const raw of hostile) {
+      const target = path.join(dir, sanitizeFileName(raw));
+      await fsp.writeFile(target, 'x');
+      // The file must exist under exactly the name we asked for.
+      expect(await fsp.readdir(dir)).toContain(path.basename(target));
+    }
+    await fsp.rm(dir, { recursive: true, force: true });
   });
 });
 

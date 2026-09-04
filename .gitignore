@@ -2,6 +2,8 @@ node_modules/
 dist/
 *.log
 .DS_Store
+Thumbs.db
+desktop.ini
 
 # Environment / local config
 .env
@@ -20,5 +22,6 @@ chrome-profile/
 session-meta.json
 *.storageState.json
 *.state.json
+browser-state.json
 downloads/
 discover-last.txt

@@ -152,13 +152,35 @@ function isTexty(fileName: string, mimeType?: string): boolean {
   return TEXTY_EXT.has(ext);
 }
 
-/** Keep files inside the managed downloads root; never trust server names. */
+/**
+ * Characters Windows forbids in a file name. The colon is the dangerous one:
+ * NTFS reads "Week 3: Notes.pdf" as an alternate data stream on a file named
+ * "Week 3", so the download reports success while the bytes land somewhere
+ * the student can never open. Blackboard names files like that constantly.
+ */
+const WINDOWS_RESERVED_CHARS = /[<>:"|?*]/g;
+
+/** MS-DOS device names, still unusable as file names on modern Windows. */
+const WINDOWS_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+/**
+ * Keep files inside the managed downloads root; never trust server names.
+ * Sanitizing to the strictest supported platform (Windows) on every platform
+ * keeps one downloads folder portable between machines.
+ */
 export function sanitizeFileName(name: string): string {
   // Treat backslashes as separators too, then take only the final segment.
   const normalized = name.replace(/[\\/]+/g, '/');
   const ext = path.posix.extname(normalized).toLowerCase().slice(0, 12);
-  const base = path.posix.basename(normalized).replace(/[\u0000-\u001f]/g, '').trim();
+  const base = path.posix.basename(normalized).replace(/[\u0000-\u001f]/g, '').trim()
+    .replace(WINDOWS_RESERVED_CHARS, '-')
+    // Windows silently strips trailing dots and spaces, quietly turning one
+    // name into a different one.
+    .replace(/[. ]+$/, '');
   let clean = base === '' || base === '.' || base === '..' ? 'attachment' : base;
+  if (WINDOWS_DEVICE_NAMES.test(path.posix.basename(clean, path.posix.extname(clean)))) {
+    clean = `_${clean}`;
+  }
   if (clean.length > 120) {
     clean = clean.slice(0, 120 - ext.length) + ext;
   }

@@ -1,11 +1,11 @@
 import { BlackboardSession } from '../blackboard/session.js';
 import { isBlackboardError } from '../blackboard/errors.js';
-import { hasProfileData, readMeta, writeMeta } from '../storage/session-store.js';
+import { hasSession, readMeta, writeMeta } from '../storage/session-store.js';
 import { runCli } from './util.js';
 
 /** Reports whether the stored Blackboard session still works. */
 async function main(): Promise<number> {
-  if (!(await hasProfileData())) {
+  if (!(await hasSession())) {
     process.stdout.write('No Blackboard session found. Run npm run login first.\n');
     return 1;
   }

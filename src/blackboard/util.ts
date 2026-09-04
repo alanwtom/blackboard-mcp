@@ -112,6 +112,40 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Default width for per-course fan-out. Blackboard is queried for one student
+ * across a handful of courses, so a few requests may overlap: the total number
+ * of requests is unchanged, they simply are not serialized behind each other.
+ * Kept deliberately small — this is a personal tool, not a crawler.
+ */
+export const DEFAULT_CONCURRENCY = 4;
+
+/**
+ * Map over items with at most `limit` promises in flight, preserving input
+ * order in the result. Replaces the hand-rolled `for` + `sleep` loops: those
+ * paid the full latency of every request in series, which dominated the wait
+ * on anything that touched more than one course.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+  limit = DEFAULT_CONCURRENCY,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const width = Math.max(1, Math.min(limit, items.length));
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: width }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index] as T, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export function slugify(text: string): string {
   return (
     text

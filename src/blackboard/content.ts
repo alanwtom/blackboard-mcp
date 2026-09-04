@@ -4,9 +4,12 @@ import { listContentFiles } from './attachments.js';
 import { getPaged } from './transport.js';
 import type { BBHttp } from './session.js';
 import type { ContentItem, ContentItemType } from './types.js';
-import { asRecord, boolField, htmlToText, sleep, strField, toIso, numField } from './util.js';
+import { asRecord, boolField, htmlToText, mapWithConcurrency, strField, toIso, numField } from './util.js';
 
 const API = '/learn/api/public/v1';
+
+/** Upper bound on per-item attachment lookups within one course listing. */
+const ATTACHMENT_RESOLUTION_CAP = 40;
 
 const HANDLER_TYPES: Record<string, ContentItemType> = {
   'resource/x-bb-folder': 'folder',
@@ -129,44 +132,34 @@ export async function getCourseContent(http: BBHttp, courseId: string, opts: Get
     const foldersWithChildren = new Set(
       all.map((i) => i.parentId).filter((p): p is string => p !== undefined),
     );
-    const queue: { folder: ContentItem; level: number }[] = all
-      .filter(
-        (i) =>
-          i.type === 'folder' &&
-          i.hasChildren &&
-          !foldersWithChildren.has(i.id),
-      )
-      .map((folder) => ({ folder, level: 1 }));
-
-    while (queue.length > 0 && all.length < maxItems) {
-      const { folder, level } = queue.shift() as { folder: ContentItem; level: number };
-      if (level >= depth) continue;
-      await sleep(150);
-      const children = await fetchLevel(folder.id);
-      for (const child of children) {
-        if (all.length >= maxItems) break;
-        if (seenIds.has(child.id)) continue;
-        seenIds.add(child.id);
-        all.push(child);
-        if (child.type === 'folder' && child.hasChildren) {
-          queue.push({ folder: child, level: level + 1 });
+    // Breadth-first, one level at a time: folders within a level are fetched
+    // together, and results are merged in listing order, so which items land
+    // under the maxItems bound stays deterministic.
+    let frontier = all.filter((i) => i.type === 'folder' && i.hasChildren && !foldersWithChildren.has(i.id));
+    for (let level = 1; level < depth && frontier.length > 0 && all.length < maxItems; level += 1) {
+      const batches = await mapWithConcurrency(frontier, (folder) => fetchLevel(folder.id));
+      const next: ContentItem[] = [];
+      for (const children of batches) {
+        for (const child of children) {
+          if (all.length >= maxItems) break;
+          if (seenIds.has(child.id)) continue;
+          seenIds.add(child.id);
+          all.push(child);
+          if (child.type === 'folder' && child.hasChildren) next.push(child);
         }
       }
+      frontier = next;
     }
 
     if (includeAttachments) {
-      const leaves = all.filter((i) => i.type === 'file' || i.type === 'document' || i.type === 'assignment');
-      let resolved = 0;
-      for (const item of leaves) {
-        if (resolved >= 40) break;
-        resolved += 1;
-        await sleep(120);
-        try {
-          item.attachments = await listContentFiles(http, courseId, item.id, item.descriptionHtml);
-        } catch {
-          item.attachments = [];
-        }
-      }
+      // One request per leaf, still capped — but overlapped rather than each
+      // one waiting out a fixed delay behind the last.
+      const leaves = all
+        .filter((i) => i.type === 'file' || i.type === 'document' || i.type === 'assignment')
+        .slice(0, ATTACHMENT_RESOLUTION_CAP);
+      await mapWithConcurrency(leaves, async (item) => {
+        item.attachments = await listContentFiles(http, courseId, item.id, item.descriptionHtml).catch(() => []);
+      });
     }
 
     all.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));

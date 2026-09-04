@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { listCourses, findCourse } from '../blackboard/courses.js';
+import { readableCourses, findCourse } from '../blackboard/courses.js';
 import { getCourseContent, type GetContentOptions } from '../blackboard/content.js';
 import { getAnnouncements } from '../blackboard/announcements.js';
 import { getAssignments, getGradebookColumns } from '../blackboard/assignments.js';
@@ -8,7 +8,7 @@ import { getGradeForColumn, getRubricForColumn, normalizeGradeCell } from '../bl
 import { listContentFiles } from '../blackboard/attachments.js';
 import { BlackboardError } from '../blackboard/errors.js';
 import type { ContentItem } from '../blackboard/types.js';
-import { isoOrNow, parseBBDate, sleep, titlesMatch } from '../blackboard/util.js';
+import { isoOrNow, mapWithConcurrency, parseBBDate, titlesMatch } from '../blackboard/util.js';
 import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
 
 const MAX_COURSES_FOR_SWEEPS = 20;
@@ -79,7 +79,7 @@ export function registerStudentTools(server: McpServer, ctx: BBToolContext): voi
           // Sweep the most recently accessed courses first: with many old
           // enrollments, alphabetical order would waste the cap on courses
           // the student hasn't opened in years.
-          const allCourses = await listCourses(http);
+          const allCourses = await readableCourses(http);
           const courses = [...allCourses]
             .sort(
               (a, b) => (b.lastAccessed ?? '').localeCompare(a.lastAccessed ?? ''),
@@ -88,85 +88,89 @@ export function registerStudentTools(server: McpServer, ctx: BBToolContext): voi
           // Keep the original ordering for the response metadata.
           void allCourses;
 
-          const announcements: Array<Record<string, unknown>> = [];
-          const newContent: Array<Record<string, unknown>> = [];
-          const changedAssignments: Array<Record<string, unknown>> = [];
-          const newGrades: Array<Record<string, unknown>> = [];
+          // Each course is swept independently and its findings collected in
+          // its own bucket, then flattened in course order. Previously this
+          // ran strictly in series with fixed delays between every step, so
+          // the wait grew with the number of courses and again with every
+          // gradebook column inside them.
+          const perCourse = await mapWithConcurrency(courses, async (course) => {
+            const tag = { course: course.name, course_id: course.id };
+            const bucket = {
+              announcements: [] as Array<Record<string, unknown>>,
+              newContent: [] as Array<Record<string, unknown>>,
+              changedAssignments: [] as Array<Record<string, unknown>>,
+              newGrades: [] as Array<Record<string, unknown>>,
+            };
 
-          for (const course of courses) {
-            try {
-              const anns = await getAnnouncements(http, course.id, { since: sinceIso, limit: 20 });
-              announcements.push(...anns.map((a) => ({ course: course.name, course_id: course.id, ...a })));
-            } catch {
-              /* per-course failures are fine in a sweep */
-            }
-            await sleep(150);
+            // Three independent sources; a failure in one must not lose the others.
+            const [anns, items, columns] = await Promise.all([
+              getAnnouncements(http, course.id, { since: sinceIso, limit: 20 }).catch(() => []),
+              getCourseContent(http, course.id, { depth: 2, includeAttachments: false, maxItems: 150 }).catch(
+                () => [] as ContentItem[],
+              ),
+              getGradebookColumns(http, course.id).catch(() => []),
+            ]);
 
-            let items: ContentItem[] = [];
-            try {
-              items = await getCourseContent(http, course.id, { depth: 2, includeAttachments: false, maxItems: 150 });
-            } catch {
-              items = [];
-            }
+            bucket.announcements.push(...anns.map((a) => ({ ...tag, ...a })));
+
             for (const item of items) {
               const modified = item.modified ? parseBBDate(item.modified) : undefined;
-              if (modified && modified >= since) {
-                newContent.push({
-                  course: course.name,
-                  course_id: course.id,
-                  content_id: item.id,
-                  title: item.title,
-                  type: item.type,
-                  modified: item.modified,
-                  url: item.url ?? null,
-                });
-              }
+              if (!modified || modified < since) continue;
+              bucket.newContent.push({
+                ...tag,
+                content_id: item.id,
+                title: item.title,
+                type: item.type,
+                modified: item.modified,
+                url: item.url ?? null,
+              });
               if (item.type === 'assignment' || item.type === 'test') {
-                if (modified && modified >= since) {
-                  changedAssignments.push({
-                    course: course.name,
-                    course_id: course.id,
-                    assignment_id: item.id,
-                    ref: `${course.id}:${item.id}`,
-                    title: item.title,
-                    modified: item.modified,
-                  });
-                }
-              }
-            }
-            await sleep(150);
-
-            try {
-              const columns = await getGradebookColumns(http, course.id);
-              for (const col of columns) {
-                const modified = col.modified ? parseBBDate(col.modified) : undefined;
-                if (!modified || modified < since) continue;
-                if (!col.contentId && !col.dueDate) continue;
-                changedAssignments.push({
-                  course: course.name,
-                  course_id: course.id,
-                  assignment_id: col.contentId,
-                  title: col.name,
-                  points_possible: col.pointsPossible,
-                  modified: col.modified,
+                bucket.changedAssignments.push({
+                  ...tag,
+                  assignment_id: item.id,
+                  ref: `${course.id}:${item.id}`,
+                  title: item.title,
+                  modified: item.modified,
                 });
-                const cell = await getGradeForColumn(http, course.id, col.id);
-                if (cell) {
-                  newGrades.push({
-                    course: course.name,
-                    course_id: course.id,
-                    title: col.name,
-                    score: cell.score ?? null,
-                    points_possible: col.pointsPossible,
-                    modified: col.modified,
-                  });
-                }
-                await sleep(120);
               }
-            } catch {
-              /* gradebook may be unavailable for some courses */
             }
-          }
+
+            const changedColumns = columns.filter((col) => {
+              const modified = col.modified ? parseBBDate(col.modified) : undefined;
+              if (!modified || modified < since) return false;
+              return Boolean(col.contentId || col.dueDate);
+            });
+            for (const col of changedColumns) {
+              bucket.changedAssignments.push({
+                ...tag,
+                assignment_id: col.contentId,
+                title: col.name,
+                points_possible: col.pointsPossible,
+                modified: col.modified,
+              });
+            }
+            const cells = await mapWithConcurrency(changedColumns, (col) =>
+              getGradeForColumn(http, course.id, col.id).catch(() => null),
+            );
+            cells.forEach((cell, i) => {
+              const col = changedColumns[i];
+              if (!cell || !col) return;
+              bucket.newGrades.push({
+                ...tag,
+                title: col.name,
+                score: cell.score ?? null,
+                points_possible: col.pointsPossible,
+                modified: col.modified,
+              });
+            });
+
+            return bucket;
+          });
+
+          const announcements = perCourse.flatMap((b) => b.announcements);
+          const newContent = perCourse.flatMap((b) => b.newContent);
+          const changedAssignments = perCourse.flatMap((b) => b.changedAssignments);
+          const newGrades = perCourse.flatMap((b) => b.newGrades);
 
           return {
             since: sinceIso,

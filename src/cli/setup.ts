@@ -1,14 +1,22 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BlackboardSession } from '../blackboard/session.js';
 import { isBlackboardError } from '../blackboard/errors.js';
-import { hasProfileData, writeMeta } from '../storage/session-store.js';
+import { hasSession, paths, writeMeta } from '../storage/session-store.js';
+import {
+  IS_WINDOWS,
+  chromeInstallCandidates,
+  claudeDesktopConfigPath,
+  findExecutable,
+  isChromeInstalled,
+  localTscScript,
+  quitAppHint,
+  runCommand,
+} from '../platform.js';
 
 const rl = createInterface({ input, output });
 
@@ -40,14 +48,13 @@ function checkNode(): boolean {
 }
 
 function checkChrome(): boolean {
-  const candidates = ['/Applications/Google Chrome.app'];
-  const found = candidates.some((p) => fs.existsSync(p));
-  if (found) {
+  if (isChromeInstalled()) {
     ok('Google Chrome installed');
     return true;
   }
   warn('Google Chrome was not found.');
   console.log('       Install it from https://www.google.com/chrome/ and run setup again.');
+  console.log(`       Looked in: ${chromeInstallCandidates().join(', ')}`);
   return false;
 }
 
@@ -58,20 +65,48 @@ function checkBuilt(): boolean {
     return true;
   }
   warn('Project is not built yet. Attempting to build (takes a moment)...');
-  const result = spawnSync('npx', ['tsc', '-p', 'tsconfig.json'], { cwd: projectRoot(), stdio: 'inherit' });
+  // Run the compiler that npm install already placed in node_modules. Going
+  // through `npx` would mean spawning npx.cmd on Windows, which Node refuses
+  // to execute directly.
+  const tsc = localTscScript(projectRoot());
+  if (!tsc) {
+    warn('Could not find the TypeScript compiler. Run `npm install`, then `npm run build`.');
+    return false;
+  }
+  const result = runCommand(process.execPath, [tsc, '-p', 'tsconfig.json'], {
+    cwd: projectRoot(),
+    stdio: 'inherit',
+  });
   const built = result.status === 0 && fs.existsSync(dist);
   if (built) ok('Project is built');
+  else warn('Build failed. Run `npm install` and then `npm run build` to see the details.');
   return built;
 }
 
+/**
+ * How the AI app should invoke Node. Windows apps launched from the Start menu
+ * often do not inherit the user's PATH, so a bare `node` there fails with
+ * ENOENT; the absolute path to the interpreter running setup always works.
+ */
+function nodeCommand(): string {
+  return IS_WINDOWS ? process.execPath : 'node';
+}
+
 function configureClaudeDesktop(): boolean {
-  const configPath = path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
-  if (!fs.existsSync(configPath)) {
+  const configPath = claudeDesktopConfigPath();
+  const configDir = path.dirname(configPath);
+  const hasConfigFile = fs.existsSync(configPath);
+  // The app's own folder is the reliable sign that it is installed. The config
+  // file itself only appears once the student has opened Developer settings,
+  // so a missing file is a normal first run, not a missing app.
+  if (!hasConfigFile && !fs.existsSync(configDir)) {
     console.log('  [ -- ] Claude Desktop not found (skipping). You can install it from https://claude.ai/download');
+    console.log(`         (looked for ${configDir})`);
     return false;
   }
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const raw = hasConfigFile ? fs.readFileSync(configPath, 'utf8').trim() : '';
+    const config = raw === '' ? {} : JSON.parse(raw);
     const entry = JSON.stringify(config.mcpServers?.blackboard ?? null);
     if (entry.includes('blackboard-mcp')) {
       ok('Claude Desktop already connected to blackboard-mcp');
@@ -79,13 +114,13 @@ function configureClaudeDesktop(): boolean {
     }
     config.mcpServers = config.mcpServers || {};
     config.mcpServers.blackboard = {
-      command: 'node',
+      command: nodeCommand(),
       args: [path.join(projectRoot(), 'dist', 'index.js')],
     };
-    fs.copyFileSync(configPath, `${configPath}.bak-blackboard-setup`);
+    if (hasConfigFile) fs.copyFileSync(configPath, `${configPath}.bak-blackboard-setup`);
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
-    ok('Claude Desktop connected (backup saved next to the config)');
-    console.log('       Quit Claude Desktop completely (Cmd + Q) and reopen it to see the tools.');
+    ok(hasConfigFile ? 'Claude Desktop connected (backup saved next to the config)' : 'Claude Desktop connected (new config file created)');
+    console.log(`       ${quitAppHint()} and reopen it to see the tools.`);
     return true;
   } catch (err) {
     warn(`Could not update Claude Desktop config automatically: ${err instanceof Error ? err.message.slice(0, 120) : 'unknown error'}`);
@@ -94,21 +129,32 @@ function configureClaudeDesktop(): boolean {
 }
 
 function configureClaudeCode(): boolean {
-  const which = spawnSync('which', ['claude'], { encoding: 'utf8' });
-  if (which.status !== 0 || !which.stdout.trim()) {
+  // `which` does not exist on Windows, and the CLI is a claude.cmd shim there.
+  const claude = findExecutable('claude');
+  if (!claude) {
     console.log('  [ -- ] Claude Code not found (skipping).');
     return false;
   }
-  const result = spawnSync(
-    'claude',
-    ['mcp', 'add', 'blackboard', '--', 'node', path.join(projectRoot(), 'dist', 'index.js')],
-    { encoding: 'utf8' },
-  );
+  const result = runCommand(claude, [
+    'mcp',
+    'add',
+    'blackboard',
+    '--',
+    nodeCommand(),
+    path.join(projectRoot(), 'dist', 'index.js'),
+  ]);
   if (result.status === 0) {
     ok('Claude Code connected (run: claude, then type /mcp to confirm)');
     return true;
   }
-  warn(`Could not add to Claude Code: ${(result.stderr || result.stdout || '').slice(0, 120)}`);
+  const output = result.stderr || result.stdout || '';
+  // `claude mcp add` refuses to overwrite an existing server, which means the
+  // job is already done rather than failed.
+  if (/already exists/i.test(output)) {
+    ok('Claude Code already connected to blackboard-mcp');
+    return true;
+  }
+  warn(`Could not add to Claude Code: ${output.slice(0, 120)}`);
   return false;
 }
 
@@ -174,7 +220,7 @@ async function main(): Promise<number> {
 
   console.log('\nStep 3 of 4: your Blackboard session');
   let active = false;
-  if (await hasProfileData()) {
+  if (await hasSession()) {
     try {
       active = await checkSession();
     } catch (err) {
@@ -220,7 +266,7 @@ async function main(): Promise<number> {
       '    "What do I have due next week?"',
       '    "What are my grades in <course>?"',
       '',
-      '  Downloads land in ~/.blackboard-mcp/downloads.',
+      `  Downloads land in ${paths.downloadsDir}.`,
       '  If a session ever expires: npm run login. That is usually all it takes.',
       '',
     ].join('\n'),

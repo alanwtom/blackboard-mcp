@@ -1,16 +1,17 @@
 import { globalCache, TTL } from './cache.js';
-import { findCourse, listCourses } from './courses.js';
+import { findCourse, noteCourseDenied, readableCourses } from './courses.js';
 import { getCourseContent } from './content.js';
 import { getAnnouncements } from './announcements.js';
 import { getPaged, getJson } from './transport.js';
+import { isBlackboardError } from './errors.js';
 import type { BBHttp } from './session.js';
 import type { Assignment, AssignmentStatus, CalendarItem, ContentItem } from './types.js';
 import {
   asRecord,
   isoOrNow,
+  mapWithConcurrency,
   numField,
   parseBBDate,
-  sleep,
   strField,
   titlesMatch,
   toIso,
@@ -20,6 +21,9 @@ import {
 
 const API = '/learn/api/public/v1';
 const API_V2 = '/learn/api/public/v2';
+
+/** Upper bound on per-assignment status lookups, to keep volume predictable. */
+const STATUS_RESOLUTION_CAP = 60;
 
 export interface GradebookColumn {
   id: string;
@@ -183,22 +187,39 @@ export interface GetAssignmentsOptions {
 export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions = {}): Promise<Assignment[]> {
   const courses = opts.courseId
     ? [await findCourse(http, opts.courseId)]
-    : await listCourses(http);
+    : await readableCourses(http);
 
-  const partsByCourse = new Map<string, Partial<Assignment>[]>();
   const calendar = await getCalendarItems(http).catch(() => [] as CalendarItem[]);
 
-  for (const course of courses) {
+  // Courses are independent, so collecting them in series made the wait scale
+  // with the number of enrolments — and most of those are past terms that
+  // answer 403 straight away. Same request count, no longer queued behind
+  // each other. Columns are kept so status resolution need not refetch them.
+  const columnsByCourse = new Map<string, GradebookColumn[]>();
+  const collected = await mapWithConcurrency(courses, async (course) => {
     const parts: Partial<Assignment>[] = [];
     const base = { courseId: course.id, courseName: course.name, url: course.url };
 
+    // Content and gradebook are independent requests; overlap them too.
+    // A course counts as locked only when both refuse: some courses publish a
+    // gradebook while hiding contents, and dropping those would lose grades.
+    let refusals = 0;
+    const denied = (err: unknown): void => {
+      if (isBlackboardError(err) && err.code === 'PERMISSION_DENIED') refusals += 1;
+    };
+    const [items, columns] = await Promise.all([
+      getCourseContent(http, course.id, { depth: 2, includeAttachments: false }).catch((err) => {
+        denied(err);
+        return [] as ContentItem[];
+      }),
+      getGradebookColumns(http, course.id).catch((err) => {
+        denied(err);
+        return [] as GradebookColumn[];
+      }),
+    ]);
+    if (refusals === 2) noteCourseDenied(course.id);
+
     // 1) Content items that are assignments or tests.
-    let items: ContentItem[] = [];
-    try {
-      items = await getCourseContent(http, course.id, { depth: 2, includeAttachments: false });
-    } catch {
-      items = [];
-    }
     for (const item of items) {
       if (item.type !== 'assignment' && item.type !== 'test') continue;
       parts.push({
@@ -211,12 +232,6 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
     }
 
     // 2) Gradebook columns tied to content or carrying due dates.
-    let columns: GradebookColumn[] = [];
-    try {
-      columns = await getGradebookColumns(http, course.id);
-    } catch {
-      columns = [];
-    }
     for (const col of columns) {
       if (!col.contentId && !col.dueDate) continue;
       parts.push({
@@ -243,8 +258,10 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
       });
     }
 
-    partsByCourse.set(course.id, parts);
-  }
+    columnsByCourse.set(course.id, columns);
+    return [course.id, parts] as const;
+  });
+  const partsByCourse = new Map<string, Partial<Assignment>[]>(collected);
 
   // Deduplicate across sources. Parts with a real content id group by id;
   // id-less parts (calendar items) attach to a matching-title bucket, or form
@@ -291,19 +308,23 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
   // Optional status resolution (bounded: one request per assignment with a
   // known column, capped to keep volume low).
   if (opts.includeStatus) {
-    let resolved = 0;
-    for (const assignment of merged) {
-      if (resolved >= 60) break;
-      const column = (partsByCourse.get(assignment.courseId) ?? []).length > 0
-        ? (await getGradebookColumns(http, assignment.courseId).catch(() => [])).find(
-            (c) => c.contentId === assignment.id || titlesMatch(c.name, assignment.title),
-          )
-        : undefined;
-      if (!column) continue;
-      resolved += 1;
-      await sleep(120);
-      assignment.status = await statusForColumn(http, assignment.courseId, column.id).catch(() => 'unknown' as AssignmentStatus);
-    }
+    // Columns were already fetched above; the previous version refetched them
+    // once per assignment (cache-shielded, but still a request per miss).
+    const pending = merged
+      .map((assignment) => ({
+        assignment,
+        column: (columnsByCourse.get(assignment.courseId) ?? []).find(
+          (c) => c.contentId === assignment.id || titlesMatch(c.name, assignment.title),
+        ),
+      }))
+      .filter((entry): entry is { assignment: Assignment; column: GradebookColumn } => entry.column !== undefined)
+      .slice(0, STATUS_RESOLUTION_CAP);
+
+    await mapWithConcurrency(pending, async ({ assignment, column }) => {
+      assignment.status = await statusForColumn(http, assignment.courseId, column.id).catch(
+        () => 'unknown' as AssignmentStatus,
+      );
+    });
   }
 
   if (opts.dueAfter || opts.dueBefore) {

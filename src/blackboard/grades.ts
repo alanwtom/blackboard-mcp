@@ -4,7 +4,7 @@ import { getGradebookColumns } from './assignments.js';
 import { getJson } from './transport.js';
 import type { BBHttp } from './session.js';
 import type { GradeEntry, GradingStatus } from './types.js';
-import { htmlToText, sleep, strField } from './util.js';
+import { htmlToText, mapWithConcurrency, strField } from './util.js';
 
 const API_V2 = '/learn/api/public/v2';
 
@@ -39,16 +39,17 @@ export function normalizeGradeCell(cell: Record<string, unknown>): {
 /**
  * The student's own grades for one course. Only data Blackboard already shows
  * the signed-in student is requested (v2 gradebook columns + the per-column
- * "users/me" grade cell). Sequential with small delays and cached.
+ * "users/me" grade cell). Cached, and fetched a few columns at a time.
  */
 export async function getGrades(http: BBHttp, courseId: string): Promise<GradeEntry[]> {
   const course = await findCourse(http, courseId);
   const cacheKey = `grades:${course.id}`;
   return globalCache.wrap(cacheKey, TTL.grades, async () => {
     const columns = await getGradebookColumns(http, course.id);
-    const entries: GradeEntry[] = [];
-    for (const column of columns) {
-      await sleep(120);
+    // One grade cell per column, fetched a few at a time. A full gradebook
+    // used to cost a fixed delay plus a full round trip for every column in
+    // series, which is what made "what are my grades" the slowest question.
+    return mapWithConcurrency(columns, async (column): Promise<GradeEntry> => {
       const cell = await getJson<Record<string, unknown>>(
         http,
         `${API_V2}/courses/${encodeURIComponent(course.id)}/gradebook/columns/${encodeURIComponent(column.id)}/users/me`,
@@ -68,7 +69,7 @@ export async function getGrades(http: BBHttp, courseId: string): Promise<GradeEn
           ? Math.round((score / pointsPossible) * 1000) / 10
           : undefined;
 
-      entries.push({
+      return {
         id: `${course.id}:${column.id}`,
         courseId: course.id,
         columnId: column.id,
@@ -80,9 +81,8 @@ export async function getGrades(http: BBHttp, courseId: string): Promise<GradeEn
         feedback: cell ? extractFeedback(cell) : undefined,
         gradingStatus,
         modified: column.modified,
-      });
-    }
-    return entries;
+      };
+    });
   });
 }
 

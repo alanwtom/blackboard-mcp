@@ -8,6 +8,7 @@ import type { BBHttp } from './session.js';
 import type { Assignment, AssignmentStatus, CalendarItem, ContentItem } from './types.js';
 import {
   asRecord,
+  gradeCellScore,
   isoOrNow,
   mapWithConcurrency,
   numField,
@@ -150,7 +151,72 @@ export function mergeAssignmentParts(parts: Partial<Assignment>[]): Assignment |
   return merged;
 }
 
-/** Attach the student's submission status for one gradebook column (1 request). */
+/**
+ * Grade-cell values that mean "the student handed something in".
+ *
+ * Compared case- and separator-insensitively, because deployments differ on
+ * NeedsGrading vs NEEDS_GRADING. "Graded" is listed for completeness; a graded
+ * item is caught earlier by its score.
+ */
+const SUBMITTED_GRADE_STATUSES = new Set([
+  'needsgrading',
+  'needsgradingagain',
+  'inprogress',
+  'inprogressagain',
+  'completed',
+  'graded',
+]);
+
+/**
+ * Read a submission out of the grade cell itself.
+ *
+ * The grade object does NOT contain an attempts array — attempts are their own
+ * endpoint — so it signals a submission via `firstRelevantAttemptId` or
+ * `status`. The old code only looked for `data.attempts`, which is never there,
+ * so every ungraded item read as "never submitted". The attempts check is kept
+ * for any deployment that does inline it.
+ */
+function submittedPerGradeCell(data: Record<string, unknown>): boolean {
+  if (strField(data, 'firstRelevantAttemptId')) return true;
+  const status = strField(data, 'status');
+  if (status && SUBMITTED_GRADE_STATUSES.has(status.replace(/[\s_-]/g, '').toLowerCase())) return true;
+  const attempts = data.attempts;
+  if (Array.isArray(attempts) && attempts.length > 0) return true;
+  return false;
+}
+
+/**
+ * Ask the attempts endpoint directly. Returns undefined when Blackboard won't
+ * say (missing endpoint, no permission) — the caller must not read that as
+ * "not submitted".
+ */
+async function hasAttemptForColumn(
+  http: BBHttp,
+  courseId: string,
+  columnId: string,
+): Promise<boolean | undefined> {
+  const data = await getJson<unknown>(
+    http,
+    `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns/${encodeURIComponent(columnId)}/attempts?limit=5`,
+    { allowNotFound: true },
+  ).catch(() => null);
+  if (!data) return undefined;
+  const results = Array.isArray(data)
+    ? data
+    : Array.isArray(asRecord(data)?.results)
+      ? (asRecord(data)?.results as unknown[])
+      : undefined;
+  if (!results) return undefined;
+  return results.length > 0;
+}
+
+/**
+ * The student's submission status for one gradebook column (1-2 requests).
+ *
+ * Only claims 'not_submitted' on positive evidence that no attempt exists.
+ * Anything inconclusive is 'unknown', because wrongly telling a student they
+ * missed a deadline is far worse than admitting we can't tell.
+ */
 async function statusForColumn(http: BBHttp, courseId: string, columnId: string): Promise<AssignmentStatus | undefined> {
   const data = await getJson<Record<string, unknown>>(
     http,
@@ -158,16 +224,14 @@ async function statusForColumn(http: BBHttp, courseId: string, columnId: string)
     { allowNotFound: true },
   );
   if (!data) return 'unknown';
-  const score = data.score;
-  if (typeof score === 'number') return 'graded';
-  if (score && typeof score === 'object') {
-    const s = (score as Record<string, unknown>).score;
-    if (typeof s === 'number') return 'graded';
-  }
+  if (gradeCellScore(data) !== undefined) return 'graded';
   if (data.exempt === true) return 'graded';
-  const attempts = data.attempts;
-  if (Array.isArray(attempts) && attempts.length > 0) return 'submitted';
-  return 'not_submitted';
+  if (submittedPerGradeCell(data)) return 'submitted';
+
+  const attempted = await hasAttemptForColumn(http, courseId, columnId);
+  if (attempted === true) return 'submitted';
+  if (attempted === false) return 'not_submitted';
+  return 'unknown';
 }
 
 export interface GetAssignmentsOptions {

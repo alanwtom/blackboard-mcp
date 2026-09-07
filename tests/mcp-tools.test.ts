@@ -23,8 +23,13 @@ interface Connected {
   http: FakeHttp;
 }
 
-async function connect(): Promise<Connected> {
+/**
+ * `pre` registers routes ahead of the defaults, which win because FakeHttp
+ * matches in registration order.
+ */
+async function connect(pre?: (http: FakeHttp) => void): Promise<Connected> {
   const http = new FakeHttp();
+  pre?.(http);
   installDefaultRoutes(http);
   const callBB = async <T>(fn: (h: BBHttp) => Promise<T>): Promise<T> => fn(http);
   const server = createBlackboardServer(callBB);
@@ -84,14 +89,39 @@ describe('blackboard-mcp server', () => {
     expect(data.announcements[0].body).toContain('Office hours');
   });
 
+  // "Upcoming" is measured from the wall clock, so this fixture's due date has
+  // to be relative. The shared one is a fixed date in 2026, which silently
+  // turned this test red the day it passed.
   it('get_upcoming_work returns assignments sorted by due date', async () => {
-    const { client } = await connect();
+    const dueSoon = new Date(Date.now() + 3 * 24 * 3600_000).toISOString();
+    const { client } = await connect((http) => {
+      http.on(/\/learn\/api\/public\/v2\/courses\/_26184_1\/gradebook\/columns\?limit=100$/, () => ({
+        json: {
+          results: [
+            {
+              id: '_c1_1',
+              contentId: '_3010_1',
+              name: 'Problem Set 1',
+              score: { maximum: 100, minimum: 0 },
+              due: dueSoon,
+            },
+          ],
+        },
+      }));
+      http.on(/\/learn\/api\/public\/v1\/calendars\/items/, () => ({
+        json: {
+          results: [
+            { id: 'evt1', type: 'gradebookItem', title: 'Problem Set 1', start: dueSoon, courseId: '_26184_1' },
+          ],
+        },
+      }));
+    });
     const result = await client.callTool({ name: 'get_upcoming_work', arguments: { days: 30 } });
     const text = (result.content as Array<{ type: string; text: string }>)[0]?.text ?? '';
     const data = JSON.parse(text) as { count: number; items: Array<{ title: string; due_date: string }> };
     expect(data.count).toBe(1);
     expect(data.items[0].title).toBe('Problem Set 1');
-    expect(data.items[0].due_date).toBe('2026-09-05T23:59:00.000Z');
+    expect(data.items[0].due_date).toBe(dueSoon);
   });
 
   it('get_assignment_context bundles instructions, attachments, grade, and announcements', async () => {

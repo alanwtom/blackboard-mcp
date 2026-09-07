@@ -15,7 +15,12 @@ export function registerAssignmentTools(server: McpServer, ctx: BBToolContext): 
         course_id: z.string().optional().describe('Blackboard course id from list_courses. Omit to include all courses.'),
         due_after: z.string().optional().describe('ISO date — only items due on/after this instant.'),
         due_before: z.string().optional().describe('ISO date — only items due on/before this instant.'),
-        include_status: z.boolean().optional().describe('Also resolve submitted/graded status (slower: one extra Blackboard request per item).'),
+        include_status: z
+          .boolean()
+          .optional()
+          .describe(
+            'Also resolve submitted/graded status (slower: 1-2 extra Blackboard requests per item). Status is "unknown" when Blackboard does not report an attempt either way — treat that as undetermined, never as missing work.',
+          ),
       },
       annotations: READ_ONLY_ANNOTATIONS,
     },

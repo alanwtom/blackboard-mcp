@@ -98,13 +98,26 @@ describe('getAssignments', () => {
     expect(ps1?.status).toBe('graded');
   });
 
-  it('reports not_submitted when there is no attempt and no score', async () => {
+  // An empty grade cell means "not graded", which is not the same as "not
+  // handed in" — the attempts endpoint is what settles it. See
+  // submission-status.test.ts for the full matrix.
+  it('reports not_submitted when the attempts endpoint confirms no attempt', async () => {
+    const http = makeHttp();
+    http.on(/\/gradebook\/columns\/_c1_1\/users\/me$/, () => ({
+      json: { userId: '_777_1', columnId: '_c1_1', score: null },
+    }));
+    http.on(/\/gradebook\/columns\/_c1_1\/attempts/, () => ({ json: { results: [] } }));
+    const assignments = await getAssignments(http, { courseId: '_26184_1', includeStatus: true });
+    expect(assignments.find((a) => a.title === 'Problem Set 1')?.status).toBe('not_submitted');
+  });
+
+  it('reports unknown when no score and no way to check attempts', async () => {
     const http = makeHttp();
     http.on(/\/gradebook\/columns\/_c1_1\/users\/me$/, () => ({
       json: { userId: '_777_1', columnId: '_c1_1', score: null },
     }));
     const assignments = await getAssignments(http, { courseId: '_26184_1', includeStatus: true });
-    expect(assignments.find((a) => a.title === 'Problem Set 1')?.status).toBe('not_submitted');
+    expect(assignments.find((a) => a.title === 'Problem Set 1')?.status).toBe('unknown');
   });
 
   it('tolerates columns without content links', async () => {

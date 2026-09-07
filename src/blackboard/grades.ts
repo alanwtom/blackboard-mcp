@@ -4,18 +4,12 @@ import { getGradebookColumns } from './assignments.js';
 import { getJson } from './transport.js';
 import type { BBHttp } from './session.js';
 import type { GradeEntry, GradingStatus } from './types.js';
-import { htmlToText, mapWithConcurrency, strField } from './util.js';
+import { gradeCellScore, htmlToText, mapWithConcurrency, strField } from './util.js';
 
 const API_V2 = '/learn/api/public/v2';
 
 function extractScore(data: Record<string, unknown>): number | undefined {
-  const score = data.score;
-  if (typeof score === 'number' && Number.isFinite(score)) return score;
-  if (score && typeof score === 'object') {
-    const inner = (score as Record<string, unknown>).score;
-    if (typeof inner === 'number' && Number.isFinite(inner)) return inner;
-  }
-  return undefined;
+  return gradeCellScore(data);
 }
 
 function extractFeedback(data: Record<string, unknown>): string | undefined {

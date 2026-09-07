@@ -27,6 +27,17 @@ export function numField(obj: unknown, path: string): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 
+/**
+ * The student's numeric score out of a gradebook grade cell.
+ *
+ * Live Ultra returns it as displayGrade.score; the documented shapes use a
+ * plain `score` number or a nested score.score. Checking only the documented
+ * two made real graded work (which arrives as displayGrade) look ungraded.
+ */
+export function gradeCellScore(cell: unknown): number | undefined {
+  return numField(cell, 'score') ?? numField(cell, 'score.score') ?? numField(cell, 'displayGrade.score');
+}
+
 export function boolField(obj: unknown, path: string): boolean | undefined {
   const v = getField(obj, path);
   return typeof v === 'boolean' ? v : undefined;

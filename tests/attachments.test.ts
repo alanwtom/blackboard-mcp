@@ -155,6 +155,36 @@ describe('downloadAttachment', () => {
     ).rejects.toMatchObject({ code: 'ATTACHMENT_NOT_FOUND' });
   });
 
+  it('never builds a /bbcswebdav/xid- path out of a file id', async () => {
+    globalCache.clear();
+    const http = new FakeHttp();
+    installDefaultRoutes(http);
+    await downloadAttachment(http, { courseId: '_26184_1', contentId: '_3001_1', fileId: '_f1_1' });
+    const fetches = http.requests.filter((r) => r.startsWith('BUFFER') || r.startsWith('CAPTURE'));
+    // A file id and a webdav xid number the same file differently, so a guessed
+    // xid path does not 404 — it resolves to whichever unrelated file owns that
+    // xid and saves it, reporting success. Ask Learn for the link instead.
+    expect(fetches.some((r) => r.includes('bbcswebdav') || r.includes('xid-'))).toBe(false);
+    expect(fetches.some((r) => r.includes('/contents/_3001_1/attachments/_f1_1/download'))).toBe(true);
+  });
+
+  it('falls back to the content link when the attachments endpoint serves no bytes', async () => {
+    globalCache.clear();
+    const http = new FakeHttp();
+    installDefaultRoutes(http);
+    http.bufferReply = (pathOrUrl) =>
+      pathOrUrl.includes('/attachments/')
+        ? { status: 404, contentType: null, bytes: Buffer.alloc(0) }
+        : { status: 200, contentType: 'application/pdf', bytes: Buffer.from('%PDF-1.4 ok'), filename: 'notes.pdf' };
+    const saved = await downloadAttachment(http, {
+      courseId: '_26184_1',
+      contentId: '_3001_1',
+      fileId: '_f1_1',
+    });
+    expect(saved.sizeBytes).toBeGreaterThan(0);
+    expect(http.requests.some((r) => r.startsWith('CAPTURE') && r.includes('/ultra/redirect'))).toBe(true);
+  });
+
   it('throws INVALID_INPUT when asked for an unknown file id', async () => {
     globalCache.clear();
     const http = new FakeHttp();

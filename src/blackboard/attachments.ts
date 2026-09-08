@@ -1,5 +1,5 @@
 import { globalCache, TTL } from './cache.js';
-import { BlackboardError, truncate } from './errors.js';
+import { BlackboardError, isBlackboardError, truncate } from './errors.js';
 import { isBlackboardHost } from './hosts.js';
 import { getJson } from './transport.js';
 import { MAX_DOWNLOAD_BYTES, type BBHttp } from './session.js';
@@ -133,10 +133,17 @@ export async function resolveAttachmentUrl(
     );
   }
   if (!chosen.url && chosen.fileId) {
-    // Last-resort construction of the standard webdav xid path; the download
-    // attempt itself verifies it.
-    const id = chosen.fileId.startsWith('_') ? chosen.fileId.slice(1) : chosen.fileId;
-    chosen.url = `/bbcswebdav/xid-${id}_1`;
+    // Ask Learn to hand back a signed download URL for this attachment id.
+    //
+    // Do NOT try to build a /bbcswebdav/xid-<fileId> path here. A file id and a
+    // webdav xid are unrelated numbering schemes for the same file, so the
+    // guessed path does not 404 — it resolves to whichever *other* file happens
+    // to own that xid, which means a download that reports success while
+    // handing the student a stranger's file from an unrelated course.
+    chosen.url =
+      `${API}/courses/${encodeURIComponent(courseId)}` +
+      `/contents/${encodeURIComponent(contentId)}` +
+      `/attachments/${encodeURIComponent(chosen.fileId)}/download`;
   }
   if (!chosen.url) {
     throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Attachment has no downloadable URL.');
@@ -284,5 +291,14 @@ export interface DownloadOptions {
  */
 export async function downloadAttachment(http: BBHttp, opts: DownloadOptions): Promise<AttachmentSaveResult> {
   const ref = await resolveAttachmentUrl(http, opts.courseId, opts.contentId, opts.fileId);
-  return downloadAttachmentRef(http, ref, { fileName: opts.fileName, subfolder: opts.subfolder });
+  const save = { fileName: opts.fileName, subfolder: opts.subfolder };
+  try {
+    return await downloadAttachmentRef(http, ref, save);
+  } catch (err) {
+    // Some items are listed by the attachments API but won't serve bytes
+    // through it. Dropping the url falls back to the /ultra/redirect content
+    // link, which still resolves for those.
+    if (!isBlackboardError(err) || err.code !== 'ATTACHMENT_NOT_FOUND') throw err;
+    return downloadAttachmentRef(http, { ...ref, url: undefined }, save);
+  }
 }

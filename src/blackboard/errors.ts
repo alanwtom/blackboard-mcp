@@ -44,6 +44,13 @@ export class BlackboardError extends Error {
     );
   }
 
+  static unreachable(): BlackboardError {
+    return new BlackboardError(
+      'BLACKBOARD_REQUEST_FAILED',
+      "Can't reach Blackboard right now. Check your internet connection (campus Wi-Fi sometimes needs you to sign in to it first), then try again.",
+    );
+  }
+
   static notLoggedIn(detail?: string): BlackboardError {
     return new BlackboardError(
       'NOT_LOGGED_IN',

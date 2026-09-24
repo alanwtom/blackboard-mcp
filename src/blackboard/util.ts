@@ -38,6 +38,25 @@ export function gradeCellScore(cell: unknown): number | undefined {
   return numField(cell, 'score') ?? numField(cell, 'score.score') ?? numField(cell, 'displayGrade.score');
 }
 
+/**
+ * The grade as the student sees it.
+ *
+ * `displayGrade.score` is only a point score when the column is scored in
+ * points. On a Complete/Incomplete column it is a flag (seen live: "Complete"
+ * with score 0), and on percent or letter columns it is not points either, so
+ * dividing it by points possible produced nonsense like 0% for a completed
+ * activity. For those, the text ("Complete", "A-") is the grade.
+ */
+export function gradeCellDisplay(cell: unknown): { score?: number; text?: string; scaleType?: string } {
+  const scaleType = strField(cell, 'displayGrade.scaleType');
+  const text = strField(cell, 'displayGrade.text');
+  const plain = numField(cell, 'score') ?? numField(cell, 'score.score');
+  if (!scaleType || scaleType === 'Score') {
+    return { score: plain ?? numField(cell, 'displayGrade.score'), text, scaleType };
+  }
+  return { score: plain, text: text ?? String(numField(cell, 'displayGrade.score') ?? ''), scaleType };
+}
+
 export function boolField(obj: unknown, path: string): boolean | undefined {
   const v = getField(obj, path);
   return typeof v === 'boolean' ? v : undefined;
@@ -63,6 +82,52 @@ export function parseBBDate(value: unknown): Date | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }
 
+/** Syracuse's time zone: what "due Friday" means to a student there. */
+export const SCHOOL_TIME_ZONE = process.env.BB_TIME_ZONE ?? 'America/New_York';
+
+/** Minutes the zone is ahead of UTC at a given instant (negative in the US). */
+function zoneOffsetMinutes(ts: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(ts));
+  const get = (t: string): number => Number(parts.find((p) => p.type === t)?.value);
+  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+  return Math.round((asUtc - ts) / 60_000);
+}
+
+/** The instant a calendar day starts (or ends) in the school's time zone. */
+export function schoolDayBoundary(year: number, month: number, day: number, edge: 'start' | 'end', timeZone = SCHOOL_TIME_ZONE): Date {
+  const guess = Date.UTC(year, month - 1, day, edge === 'start' ? 0 : 23, edge === 'start' ? 0 : 59, edge === 'start' ? 0 : 59, edge === 'start' ? 0 : 999);
+  return new Date(guess - zoneOffsetMinutes(guess, timeZone) * 60_000);
+}
+
+/** The end of the school-time-zone day that contains `d`. */
+export function endOfSchoolDay(d: Date, timeZone = SCHOOL_TIME_ZONE): Date {
+  const local = new Date(d.getTime() + zoneOffsetMinutes(d.getTime(), timeZone) * 60_000);
+  return schoolDayBoundary(local.getUTCFullYear(), local.getUTCMonth() + 1, local.getUTCDate(), 'end', timeZone);
+}
+
+/**
+ * A window bound as the student means it. A bare date ("2026-09-30") is a
+ * whole day in Syracuse time: as an "after" bound it starts at local
+ * midnight, as a "before" bound it runs to 23:59:59. Parsed as a plain date,
+ * it meant midnight UTC — 8pm the evening before in Syracuse — so
+ * "due by the 30th" silently dropped everything due on the 30th.
+ */
+export function parseWindowBound(value: string | undefined, edge: 'start' | 'end'): Date | undefined {
+  if (!value) return undefined;
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (dateOnly) return schoolDayBoundary(Number(dateOnly[1]), Number(dateOnly[2]), Number(dateOnly[3]), edge);
+  return parseBBDate(value);
+}
+
 export function toIso(value: unknown): string | undefined {
   const d = parseBBDate(value);
   return d ? d.toISOString() : undefined;
@@ -84,11 +149,11 @@ export function withinWindow(
   const d = parseBBDate(iso);
   if (!d) return false;
   if (opts.after) {
-    const a = parseBBDate(opts.after);
+    const a = parseWindowBound(opts.after, 'start');
     if (a && d < a) return false;
   }
   if (opts.before) {
-    const b = parseBBDate(opts.before);
+    const b = parseWindowBound(opts.before, 'end');
     if (b && d > b) return false;
   }
   return true;

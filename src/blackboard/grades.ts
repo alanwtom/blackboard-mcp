@@ -4,7 +4,7 @@ import { getGradebookColumns } from './assignments.js';
 import { getJson } from './transport.js';
 import type { BBHttp } from './session.js';
 import type { GradeEntry, GradingStatus } from './types.js';
-import { gradeCellScore, htmlToText, mapWithConcurrency, strField } from './util.js';
+import { gradeCellDisplay, gradeCellScore, htmlToText, mapWithConcurrency, strField } from './util.js';
 
 const API_V2 = '/learn/api/public/v2';
 
@@ -21,13 +21,21 @@ function extractFeedback(data: Record<string, unknown>): string | undefined {
 /** Normalized view of a student's grade cell for MCP output. */
 export function normalizeGradeCell(cell: Record<string, unknown>): {
   score?: number;
+  display?: string;
   feedback?: string;
   gradingStatus: GradingStatus;
 } {
-  const score = extractScore(cell);
-  const gradingStatus: GradingStatus =
-    cell.exempt === true ? 'exempt' : score !== undefined ? 'graded' : 'not_graded';
-  return { score, feedback: extractFeedback(cell), gradingStatus };
+  const shown = gradeCellDisplay(cell);
+  return { score: shown.score, display: shown.text, feedback: extractFeedback(cell), gradingStatus: cellStatus(cell) };
+}
+
+function cellStatus(cell: Record<string, unknown>): GradingStatus {
+  if (cell.exempt === true) return 'exempt';
+  if (extractScore(cell) !== undefined || strField(cell, 'displayGrade.text')) return 'graded';
+  const status = (strField(cell, 'status') ?? '').replace(/[\s_-]/g, '').toLowerCase();
+  if (status === 'graded') return 'graded';
+  if (status === 'needsgrading' || status === 'needsgradingagain') return 'needs_grading';
+  return 'not_graded';
 }
 
 /**
@@ -50,12 +58,10 @@ export async function getGrades(http: BBHttp, courseId: string): Promise<GradeEn
         { allowNotFound: true },
       ).catch(() => null);
 
-      const score = cell ? extractScore(cell) : undefined;
-      const exempt = cell?.exempt === true;
-      let gradingStatus: GradingStatus = 'unknown';
-      if (exempt) gradingStatus = 'exempt';
-      else if (score !== undefined) gradingStatus = 'graded';
-      else if (cell) gradingStatus = 'not_graded';
+      const shown = cell ? gradeCellDisplay(cell) : {};
+      const score = shown.score;
+      // No cell at all means the request failed: that is "unknown", not "not graded".
+      const gradingStatus: GradingStatus = cell ? cellStatus(cell) : 'unknown';
 
       const pointsPossible = column.pointsPossible;
       const percentage =
@@ -70,6 +76,7 @@ export async function getGrades(http: BBHttp, courseId: string): Promise<GradeEn
         title: column.name,
         dueDate: column.dueDate,
         score,
+        display: shown.text,
         pointsPossible,
         percentage,
         feedback: cell ? extractFeedback(cell) : undefined,

@@ -84,7 +84,9 @@ export async function getCalendarItems(
   http: BBHttp,
   opts: { sinceMs?: number; untilMs?: number } = {},
 ): Promise<CalendarItem[]> {
-  const now = Date.now();
+  // Rounded to the hour so back-to-back calls share one cached result; the
+  // raw clock made every call a cache miss.
+  const now = Math.floor(Date.now() / 3600_000) * 3600_000;
   const since = opts.sinceMs ?? now - 30 * 24 * 3600_000;
   const until = opts.untilMs ?? now + 120 * 24 * 3600_000;
   const cacheKey = `calendar:${since}:${until}`;
@@ -148,6 +150,7 @@ export function mergeAssignmentParts(parts: Partial<Assignment>[]): Assignment |
   merged.pointsPossible = pickNum(...parts.map((p) => p.pointsPossible));
   merged.status = pickStr(...parts.map((p) => p.status)) as AssignmentStatus | undefined;
   merged.url = pickStr(...parts.map((p) => p.url));
+  merged.columnId = pickStr(...parts.map((p) => p.columnId));
   return merged;
 }
 
@@ -158,14 +161,16 @@ export function mergeAssignmentParts(parts: Partial<Assignment>[]): Assignment |
  * NeedsGrading vs NEEDS_GRADING. "Graded" is listed for completeness; a graded
  * item is caught earlier by its score.
  */
-const SUBMITTED_GRADE_STATUSES = new Set([
-  'needsgrading',
-  'needsgradingagain',
-  'inprogress',
-  'inprogressagain',
-  'completed',
-  'graded',
-]);
+const SUBMITTED_GRADE_STATUSES = new Set(['needsgrading', 'needsgradingagain', 'completed', 'graded']);
+
+/**
+ * Attempt states that mean "started, not handed in". Blackboard uses
+ * InProgress for a saved draft; counting that as submitted told a student
+ * with an unsent draft that they were done.
+ */
+const UNSUBMITTED_ATTEMPT_STATUSES = new Set(['inprogress', 'notattempted', 'abandoned', 'suspended', 'canceled', 'cancelled']);
+
+const statusKey = (s: string | undefined): string => (s ?? '').replace(/[\s_-]/g, '').toLowerCase();
 
 /**
  * Read a submission out of the grade cell itself.
@@ -177,12 +182,7 @@ const SUBMITTED_GRADE_STATUSES = new Set([
  * for any deployment that does inline it.
  */
 function submittedPerGradeCell(data: Record<string, unknown>): boolean {
-  if (strField(data, 'firstRelevantAttemptId')) return true;
-  const status = strField(data, 'status');
-  if (status && SUBMITTED_GRADE_STATUSES.has(status.replace(/[\s_-]/g, '').toLowerCase())) return true;
-  const attempts = data.attempts;
-  if (Array.isArray(attempts) && attempts.length > 0) return true;
-  return false;
+  return SUBMITTED_GRADE_STATUSES.has(statusKey(strField(data, 'status')));
 }
 
 /**
@@ -190,11 +190,11 @@ function submittedPerGradeCell(data: Record<string, unknown>): boolean {
  * say (missing endpoint, no permission) — the caller must not read that as
  * "not submitted".
  */
-async function hasAttemptForColumn(
+async function attemptStateForColumn(
   http: BBHttp,
   courseId: string,
   columnId: string,
-): Promise<boolean | undefined> {
+): Promise<'submitted' | 'in_progress' | 'none' | undefined> {
   const data = await getJson<unknown>(
     http,
     `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns/${encodeURIComponent(columnId)}/attempts?limit=5`,
@@ -207,7 +207,10 @@ async function hasAttemptForColumn(
       ? (asRecord(data)?.results as unknown[])
       : undefined;
   if (!results) return undefined;
-  return results.length > 0;
+  if (results.length === 0) return 'none';
+  const states = results.map((r) => statusKey(strField(r, 'status')));
+  if (states.some((s) => s === '' || !UNSUBMITTED_ATTEMPT_STATUSES.has(s))) return 'submitted';
+  return 'in_progress';
 }
 
 /**
@@ -224,13 +227,18 @@ async function statusForColumn(http: BBHttp, courseId: string, columnId: string)
     { allowNotFound: true },
   );
   if (!data) return 'unknown';
-  if (gradeCellScore(data) !== undefined) return 'graded';
+  if (gradeCellScore(data) !== undefined || strField(data, 'displayGrade.text')) return 'graded';
   if (data.exempt === true) return 'graded';
   if (submittedPerGradeCell(data)) return 'submitted';
 
-  const attempted = await hasAttemptForColumn(http, courseId, columnId);
-  if (attempted === true) return 'submitted';
-  if (attempted === false) return 'not_submitted';
+  const attempted = await attemptStateForColumn(http, courseId, columnId);
+  if (attempted === 'submitted') return 'submitted';
+  if (attempted === 'in_progress') return 'in_progress';
+  if (attempted === 'none') return 'not_submitted';
+  // The attempts list was unavailable. The grade cell pointing at an attempt
+  // is still evidence something was handed in.
+  const inline = data.attempts;
+  if (strField(data, 'firstRelevantAttemptId') || (Array.isArray(inline) && inline.length > 0)) return 'submitted';
   return 'unknown';
 }
 
@@ -240,6 +248,8 @@ export interface GetAssignmentsOptions {
   dueBefore?: string;
   /** Resolve submission status (extra per-column request; off by default). */
   includeStatus?: boolean;
+  /** Told about anything that makes the answer incomplete, in plain words. */
+  onWarning?: (message: string) => void;
 }
 
 /**
@@ -271,17 +281,27 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
     const denied = (err: unknown): void => {
       if (isBlackboardError(err) && err.code === 'PERMISSION_DENIED') refusals += 1;
     };
+    let failure: string | undefined;
+    const failed = (err: unknown): void => {
+      denied(err);
+      if (!(isBlackboardError(err) && err.code === 'PERMISSION_DENIED')) {
+        failure = err instanceof Error ? err.message : String(err);
+      }
+    };
     const [items, columns] = await Promise.all([
       getCourseContent(http, course.id, { depth: 2, includeAttachments: false }).catch((err) => {
-        denied(err);
+        failed(err);
         return [] as ContentItem[];
       }),
       getGradebookColumns(http, course.id).catch((err) => {
-        denied(err);
+        failed(err);
         return [] as GradebookColumn[];
       }),
     ]);
     if (refusals === 2) noteCourseDenied(course.id);
+    // A real failure (not "this old course is locked") must be said out loud,
+    // or the answer reads as "nothing due in this course".
+    if (failure) opts.onWarning?.(`Could not fully load ${course.name}, so its work may be missing: ${failure}`);
 
     // 1) Content items that are assignments or tests.
     for (const item of items) {
@@ -291,6 +311,7 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
         title: item.title,
         descriptionText: item.descriptionText,
         category: item.type === 'test' ? 'test' : 'assignment',
+        columnId: item.gradeColumnId,
         ...base,
       });
     }
@@ -304,6 +325,7 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
         dueDate: col.dueDate,
         pointsPossible: col.pointsPossible,
         category: 'gradebook-column',
+        columnId: col.id,
         ...base,
       });
     }
@@ -369,28 +391,6 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
     .map((bucket) => mergeAssignmentParts(bucket))
     .filter((a): a is Assignment => a !== undefined);
 
-  // Optional status resolution (bounded: one request per assignment with a
-  // known column, capped to keep volume low).
-  if (opts.includeStatus) {
-    // Columns were already fetched above; the previous version refetched them
-    // once per assignment (cache-shielded, but still a request per miss).
-    const pending = merged
-      .map((assignment) => ({
-        assignment,
-        column: (columnsByCourse.get(assignment.courseId) ?? []).find(
-          (c) => c.contentId === assignment.id || titlesMatch(c.name, assignment.title),
-        ),
-      }))
-      .filter((entry): entry is { assignment: Assignment; column: GradebookColumn } => entry.column !== undefined)
-      .slice(0, STATUS_RESOLUTION_CAP);
-
-    await mapWithConcurrency(pending, async ({ assignment, column }) => {
-      assignment.status = await statusForColumn(http, assignment.courseId, column.id).catch(
-        () => 'unknown' as AssignmentStatus,
-      );
-    });
-  }
-
   if (opts.dueAfter || opts.dueBefore) {
     merged = merged.filter((a) => withinWindow(a.dueDate, { after: opts.dueAfter, before: opts.dueBefore }));
   }
@@ -400,7 +400,37 @@ export async function getAssignments(http: BBHttp, opts: GetAssignmentsOptions =
     const db = b.dueDate ? isoOrNow(b.dueDate).getTime() : Number.MAX_SAFE_INTEGER;
     return da - db;
   });
+
+  // Optional status resolution, after filtering and sorting: the cap should
+  // spend its requests on the soonest-due items in the answer, not on
+  // whatever came first in course order and was then filtered away.
+  if (opts.includeStatus) {
+    const pending = merged
+      .map((assignment) => ({ assignment, column: columnFor(columnsByCourse.get(assignment.courseId) ?? [], assignment) }))
+      .filter((entry): entry is { assignment: Assignment; column: GradebookColumn } => entry.column !== undefined);
+    if (pending.length > STATUS_RESOLUTION_CAP) {
+      opts.onWarning?.(`Submission status was checked for the first ${STATUS_RESOLUTION_CAP} items only; the rest show no status.`);
+    }
+    await mapWithConcurrency(pending.slice(0, STATUS_RESOLUTION_CAP), async ({ assignment, column }) => {
+      assignment.status = await statusForColumn(http, assignment.courseId, column.id).catch(
+        () => 'unknown' as AssignmentStatus,
+      );
+    });
+  }
   return merged;
+}
+
+/**
+ * The gradebook column for an assignment: the exact link Blackboard states
+ * first, then the content id, and a title match only as a last resort — two
+ * weekly items both called "Reflection" must not share one status.
+ */
+export function columnFor(columns: GradebookColumn[], a: { id?: string; columnId?: string; title?: string }): GradebookColumn | undefined {
+  return (
+    (a.columnId ? columns.find((c) => c.id === a.columnId) : undefined) ??
+    (a.id ? columns.find((c) => c.contentId === a.id) : undefined) ??
+    columns.find((c) => titlesMatch(c.name, a.title))
+  );
 }
 
 export { statusForColumn };

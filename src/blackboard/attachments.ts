@@ -244,9 +244,24 @@ export async function downloadAttachmentRef(
   }
 
   const rawName = opts.fileName ?? ref.fileName ?? resp.filename ?? `attachment-${ref.contentId}`;
+  const result = await saveToDownloads(resp.bytes, rawName, opts.subfolder, resp.contentType ?? ref.mimeType);
+  result.bytes = resp.bytes;
+  return result;
+}
+
+/**
+ * Write bytes into the downloads folder under a safe, non-clashing name.
+ * Existing files are never overwritten: a second copy gets "-1", "-2", ...
+ */
+export async function saveToDownloads(
+  bytes: Buffer,
+  rawName: string,
+  subfolder?: string,
+  mimeType?: string | null,
+): Promise<AttachmentSaveResult> {
   const fileName = sanitizeFileName(rawName);
-  const dir = opts.subfolder
-    ? safeJoin(paths.downloadsDir, sanitizeFileName(opts.subfolder))
+  const dir = subfolder
+    ? safeJoin(paths.downloadsDir, sanitizeFileName(subfolder))
     : safeJoin(paths.downloadsDir);
   await fs.mkdir(dir, { recursive: true });
   let target = safeJoin(dir, fileName);
@@ -260,16 +275,16 @@ export async function downloadAttachmentRef(
       break;
     }
   }
-  await fs.writeFile(target, resp.bytes);
+  await fs.writeFile(target, bytes);
 
   const result: AttachmentSaveResult = {
     path: target,
     fileName: path.basename(target),
-    sizeBytes: resp.bytes.length,
-    mimeType: resp.contentType ?? ref.mimeType,
+    sizeBytes: bytes.length,
+    mimeType: mimeType ?? undefined,
   };
-  if (isTexty(result.fileName, result.mimeType) && resp.bytes.length <= TEXT_EXCERPT_MAX_BYTES) {
-    result.textExcerpt = truncate(resp.bytes.toString('utf8'), TEXT_EXCERPT_CHARS);
+  if (isTexty(result.fileName, result.mimeType) && bytes.length <= TEXT_EXCERPT_MAX_BYTES) {
+    result.textExcerpt = truncate(bytes.toString('utf8'), TEXT_EXCERPT_CHARS);
   }
   return result;
 }

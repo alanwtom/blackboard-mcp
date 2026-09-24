@@ -28,6 +28,7 @@ export function registerGradeTools(server: McpServer, ctx: BBToolContext): void 
             grade_id: g.id,
             title: g.title,
             score: g.score,
+            grade_display: g.display,
             points_possible: g.pointsPossible,
             percentage: g.percentage,
             grading_status: g.gradingStatus,

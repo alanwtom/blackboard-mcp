@@ -4,6 +4,8 @@ import type { BBHttp } from '../blackboard/session.js';
 /** Dependency boundary: MCP handlers call Blackboard only through callBB. */
 export interface BBToolContext {
   callBB: <T>(fn: (http: BBHttp) => Promise<T>) => Promise<T>;
+  /** Pop up a visible window on a link that needs a sign-in (absent in tests and CLIs). */
+  openSignIn?: (url: string, service: string) => Promise<'opened' | 'busy'>;
 }
 
 export interface ToolResult {

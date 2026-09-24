@@ -4,6 +4,8 @@ import { listContentFiles } from './attachments.js';
 import { getPaged } from './transport.js';
 import type { BBHttp } from './session.js';
 import type { ContentItem, ContentItemType } from './types.js';
+import { allowLinks } from './link-registry.js';
+import { classifyLink, extractLinks, mergeLinks, type LinkRef } from './links.js';
 import { asRecord, boolField, htmlToText, mapWithConcurrency, strField, toIso, numField } from './util.js';
 
 const API = '/learn/api/public/v1';
@@ -19,6 +21,10 @@ const HANDLER_TYPES: Record<string, ContentItemType> = {
   'resource/x-bb-assignment': 'assignment',
   'resource/x-bb-asmt-test': 'test',
   'resource/x-bb-asmt-survey': 'survey',
+  // How Ultra actually lists assignments and tests (seen live, Sep 2026).
+  'resource/x-bb-asmt-test-link': 'assignment',
+  'resource/x-bb-lesson': 'folder',
+  'resource/x-bb-blti-link': 'tool',
   'resource/x-bb-externallink': 'link',
   'resource/x-bb-toollink': 'link',
   'resource/x-bb-blankpage': 'page',
@@ -38,7 +44,17 @@ export function normalizeContentItem(raw: unknown, courseId: string): ContentIte
   const title = strField(rec, 'title');
   if (!id || !title) return null;
   const type = handlerType(rec);
-  const descriptionHtml = strField(rec, 'description') ?? strField(rec, 'body.formattedText') ?? strField(rec, 'body');
+  // Documents keep their text in `body`; `description` is a short summary
+  // some items also have. Read both — taking only the first dropped whole
+  // documents whenever a professor had also filled in a description.
+  // Ultra assignments and tests keep their instructions on the handler.
+  const parts = [
+    strField(rec, 'description'),
+    strField(rec, 'body.formattedText') ?? strField(rec, 'body'),
+    strField(rec, 'contentHandler.instructions'),
+  ]
+    .filter((p): p is string => Boolean(p));
+  const descriptionHtml = parts.length > 0 ? [...new Set(parts)].join('\n') : undefined;
   const item: ContentItem = {
     id,
     courseId,
@@ -49,12 +65,16 @@ export function normalizeContentItem(raw: unknown, courseId: string): ContentIte
     descriptionText: htmlToText(descriptionHtml),
     hasChildren: boolField(rec, 'hasChildren') ?? type === 'folder',
     attachments: [],
+    links: [],
     position: numField(rec, 'position'),
+    gradeColumnId: strField(rec, 'contentHandler.gradeColumnId'),
     modified: toIso(rec.modified),
   };
-  if (type === 'link') {
-    item.url = strField(rec, 'contentHandler.url');
-  }
+  const handlerUrl = type === 'link' || type === 'tool' ? strField(rec, 'contentHandler.url') : undefined;
+  if (handlerUrl) item.url = handlerUrl;
+  const own: LinkRef[] = handlerUrl && type === 'link' ? [{ url: handlerUrl, label: title, kind: classifyLink(handlerUrl) }] : [];
+  item.links = mergeLinks(own, extractLinks(descriptionHtml));
+  allowLinks(item.links.map((l) => l.url));
   // Ultra file data rides on the handler (verified live); the alternate
   // /ultra/redirect link is what resolves to the actual bytes.
   const altHref = altLinkHref(rec);
@@ -87,6 +107,17 @@ function altLinkHref(rec: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+/**
+ * Why a listing is incomplete, when it is. Kept beside the (cached) array
+ * rather than in it, so every existing caller keeps getting a plain list.
+ */
+const truncation = new WeakMap<ContentItem[], string>();
+
+/** A plain-language note when a course listing was cut short, else undefined. */
+export function contentTruncation(items: ContentItem[]): string | undefined {
+  return truncation.get(items);
+}
+
 export interface GetContentOptions {
   /** Fetch children of a specific folder instead of the course root. */
   folderId?: string;
@@ -103,8 +134,9 @@ export interface GetContentOptions {
  * first up to `depth` levels with a bounded item cap; deeper dives use
  * `folderId` to fetch one folder at a time.
  */
-export async function getCourseContent(http: BBHttp, courseId: string, opts: GetContentOptions = {}): Promise<ContentItem[]> {
-  await findCourse(http, courseId);
+export async function getCourseContent(http: BBHttp, courseIdOrCode: string, opts: GetContentOptions = {}): Promise<ContentItem[]> {
+  // Accept a course code too, but always talk to Blackboard in internal ids.
+  const courseId = (await findCourse(http, courseIdOrCode)).id;
   const depth = Math.max(1, Math.min(opts.depth ?? 2, 4));
   const maxItems = opts.maxItems ?? 300;
   const includeAttachments = opts.includeAttachments ?? true;
@@ -122,7 +154,8 @@ export async function getCourseContent(http: BBHttp, courseId: string, opts: Get
     };
 
     const all: ContentItem[] = await fetchLevel(opts.folderId);
-    if (all.length > maxItems) all.length = maxItems;
+    let hitCap = all.length > maxItems;
+    if (hitCap) all.length = maxItems;
 
     // Gap-filling expansion. Some Ultra listings are fully flat (children
     // included), others list only top-level folders; and a single course can
@@ -141,7 +174,10 @@ export async function getCourseContent(http: BBHttp, courseId: string, opts: Get
       const next: ContentItem[] = [];
       for (const children of batches) {
         for (const child of children) {
-          if (all.length >= maxItems) break;
+          if (all.length >= maxItems) {
+            hitCap = true;
+            break;
+          }
           if (seenIds.has(child.id)) continue;
           seenIds.add(child.id);
           all.push(child);
@@ -154,15 +190,24 @@ export async function getCourseContent(http: BBHttp, courseId: string, opts: Get
     if (includeAttachments) {
       // One request per leaf, still capped — but overlapped rather than each
       // one waiting out a fixed delay behind the last.
+      // Items that already carry their file (from the listing itself) are
+      // skipped: overwriting them with an empty lookup used to erase the only
+      // download link a plain file item has.
       const leaves = all
-        .filter((i) => i.type === 'file' || i.type === 'document' || i.type === 'assignment')
+        .filter((i) => (i.type === 'file' || i.type === 'document' || i.type === 'assignment') && i.attachments.length === 0)
         .slice(0, ATTACHMENT_RESOLUTION_CAP);
       await mapWithConcurrency(leaves, async (item) => {
-        item.attachments = await listContentFiles(http, courseId, item.id, item.descriptionHtml).catch(() => []);
+        const found = await listContentFiles(http, courseId, item.id, item.descriptionHtml).catch(() => []);
+        if (found.length > 0) item.attachments = found;
       });
     }
 
     all.sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    if (hitCap) {
+      truncation.set(all, `Only the first ${maxItems} items are listed; this course has more. Pass folder_id to list one folder at a time.`);
+    } else if (frontier.length > 0) {
+      truncation.set(all, `Folders nested deeper than ${depth} levels are not expanded. Pass folder_id to open them: ${frontier.slice(0, 10).map((f) => `"${f.title}" (${f.id})`).join(', ')}.`);
+    }
     return all;
   });
 }

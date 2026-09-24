@@ -1,9 +1,11 @@
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import type { BrowserContext, Page } from 'playwright';
 import { launchBrowser } from './browser.js';
 import { BlackboardError, isBlackboardError, truncate } from './errors.js';
 import { isBlackboardHost, isDownloadHost, BLACKBOARD_HOSTS } from './hosts.js';
 import type { BBIdentity } from './types.js';
-import { readMeta, writeMeta, loadCookies, saveCookies } from '../storage/session-store.js';
+import { connectedSites, readMeta, writeMeta, loadCookies, saveCookies } from '../storage/session-store.js';
 
 export const BASE_URL = process.env.BB_BASE_URL ?? 'https://blackboard.syr.edu';
 
@@ -18,6 +20,53 @@ const SSO_ENTRY_URL =
   'https://blackboard.syracuse.edu/auth-saml/saml/login?apId=_3987_1&redirectUrl=https%3A%2F%2Fblackboard.syracuse.edu%2Fultra%2Fcourses';
 
 export { BLACKBOARD_HOSTS } from './hosts.js';
+
+/** A red banner (and tab title) that says what to do in this tab. Pure UI aid. */
+async function markPage(page: Page, instruction: string): Promise<void> {
+  await page
+    .evaluate(
+      `((text) => {
+        const title = '▶ SIGN IN HERE — blackboard-mcp';
+        if (document.title !== title) document.title = title;
+        if (document.body && !document.getElementById('bbmcp-login-banner')) {
+          const banner = document.createElement('div');
+          banner.id = 'bbmcp-login-banner';
+          banner.textContent = '▶ blackboard-mcp: ' + text;
+          banner.style.cssText =
+            'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#c5221f;color:#fff;padding:12px 18px;font:600 15px/1.4 -apple-system,system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;';
+          document.body.appendChild(banner);
+        }
+      })(${JSON.stringify(instruction)})`,
+    )
+    .catch(() => undefined);
+}
+
+/**
+ * Record the sites a sign-in touched so their cookies are kept across
+ * restarts (many sign-ins, Zoom's included, are session cookies that Chrome
+ * drops when it closes).
+ *
+ * Google is left out on purpose: its sign-in cookies already last for years
+ * inside the profile, and a copy in a plain file would be a key to the
+ * student's whole Google account. Microsoft and Blackboard are always kept.
+ */
+export async function rememberConnectedSites(hosts: string[]): Promise<void> {
+  const sites = new Set(await connectedSites());
+  const before = sites.size;
+  for (const host of hosts) {
+    const site = host.toLowerCase().split('.').slice(-2).join('.');
+    if (!site.includes('.') || /^(google|gstatic|googleusercontent|youtube)\.com$/.test(site)) continue;
+    sites.add(site);
+  }
+  if (sites.size !== before) await writeMeta({ connectedSites: [...sites] }).catch(() => undefined);
+}
+
+/** Cookie domains worth carrying across browser restarts (see saveSnapshot). */
+export function isSnapshotCookieDomain(domain: string, extraSites: string[] = []): boolean {
+  const d = domain.replace(/^\./, '').toLowerCase();
+  const keep = [...BLACKBOARD_HOSTS, 'syr.edu', 'syracuse.edu', 'login.microsoftonline.com', 'microsoftonline.com', 'login.live.com', ...extraSites];
+  return keep.some((k) => d === k || d.endsWith(`.${k}`));
+}
 
 /** Serialized init that survives page.evaluate's structured clone. */
 export interface BBRequestInit {
@@ -51,6 +100,173 @@ export interface BBHttp {
   toSameOriginPath(href: string): string;
   /** Resolve an /ultra/redirect link through the real page and capture the file. */
   captureRedirectDownload(pathOrUrl: string, timeoutMs?: number): Promise<BBBufferResponse>;
+  /**
+   * Outside sites (Google, Zoom, OneDrive, ...), reached with the dedicated
+   * browser's own sign-ins. Optional so test fakes that only model Blackboard
+   * stay small; link tools report a clear error when it is missing.
+   */
+  external?: ExternalHttp;
+}
+
+export interface ExternalResponse {
+  status: number;
+  contentType: string | null;
+  bytes: Buffer;
+  /** Where the request ended up after redirects. */
+  finalUrl: string;
+  filename?: string;
+}
+
+export interface RenderedPage {
+  finalUrl: string;
+  title: string;
+  /** What a person would read on the page (main content first). */
+  text: string;
+  /** Links on the rendered page, absolute URLs. */
+  links: { url: string; label?: string }[];
+  /** JSON/text responses the page loaded whose URL matched `capture`. */
+  captured: { url: string; status: number; body: string }[];
+  /** Set when the page tried to navigate to a file instead of a page. */
+  fileUrl?: string;
+  /** Result of the optional in-page script. */
+  evaluated?: unknown;
+}
+
+export interface RenderOptions {
+  /** Keep the bodies of responses whose URL matches (e.g. a player's info API). */
+  capture?: RegExp;
+  /** Script (a function body returning a value) to run once the page settles. */
+  evaluate?: string;
+  /** Extra settle time after load, for pages that fetch their content late. */
+  settleMs?: number;
+}
+
+export interface ExternalHttp {
+  /** Plain GET with the dedicated browser's cookies; redirects are checked hop by hop. */
+  fetch(url: string, opts?: { maxBytes?: number }): Promise<ExternalResponse>;
+  /** Open the page in a real tab, let it render, and read what it shows. */
+  render(url: string, opts?: RenderOptions): Promise<RenderedPage>;
+}
+
+/**
+ * Hosts an outside link must never reach: this machine and private networks.
+ * A professor's link is a public web page; anything pointing inward is either
+ * a mistake or an attempt to use the student's browser as a way in.
+ */
+export function isPrivateHost(hostname: string): boolean {
+  // "localhost." (trailing dot) is still localhost to the resolver.
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (h.includes(':')) {
+    // IPv6 literal: anything starting "::" (loopback, unspecified, IPv4-
+    // compatible and IPv4-mapped forms), link-local and site-local (fe80–
+    // feff), unique-local (fc/fd), and NAT64 (64:ff9b::), which can wrap
+    // any IPv4 address including private ones.
+    return h.startsWith('::') || /^fe[89a-f]/.test(h) || /^f[cd]/.test(h) || h.startsWith('64:ff9b:');
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+const resolvedPrivate = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether a hostname resolves to a private address. A public-looking name
+ * can still point at 192.168.x.x; checking the name alone missed that.
+ * Cached per host for the life of the process. A name that does not resolve
+ * is not "private" — the request will simply fail.
+ */
+export function resolvesToPrivate(hostname: string): Promise<boolean> {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (isPrivateHost(h)) return Promise.resolve(true);
+  if (isIP(h)) return Promise.resolve(false);
+  let hit = resolvedPrivate.get(h);
+  if (!hit) {
+    hit = lookup(h, { all: true })
+      .then((addrs) => addrs.some((a) => isPrivateHost(a.address)))
+      .catch(() => false);
+    resolvedPrivate.set(h, hit);
+  }
+  return hit;
+}
+
+/** Like assertPublicUrl, and also refuses names that resolve to private addresses. */
+export async function assertPublicDestination(raw: string): Promise<URL> {
+  const u = assertPublicUrl(raw);
+  if (await resolvesToPrivate(u.hostname)) {
+    throw new BlackboardError('INVALID_INPUT', 'Refusing to open a link to this computer or a private network.');
+  }
+  return u;
+}
+
+/** Parse Set-Cookie headers into cookies the browser context can store. */
+type NewCookie = Parameters<BrowserContext['addCookies']>[0][number];
+
+export function parseSetCookies(headers: string[], url: string): NewCookie[] {
+  const out: NewCookie[] = [];
+  const host = new URL(url).hostname;
+  for (const header of headers) {
+    const [pair, ...attrs] = header.split(';');
+    const eq = pair?.indexOf('=') ?? -1;
+    if (!pair || eq <= 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    let domain: string | undefined;
+    let cookiePath = '/';
+    let expires = -1;
+    let secure = false;
+    let httpOnly = false;
+    let sameSite: 'Strict' | 'Lax' | 'None' | undefined;
+    for (const attr of attrs) {
+      const [k, ...v] = attr.split('=');
+      const key = (k ?? '').trim().toLowerCase();
+      const val = v.join('=').trim();
+      if (key === 'domain' && val) domain = val.replace(/^\./, '');
+      else if (key === 'path' && val) cookiePath = val;
+      else if (key === 'max-age' && val) expires = Math.floor(Date.now() / 1000) + Number(val);
+      else if (key === 'expires' && val && expires === -1) {
+        const t = Date.parse(val);
+        if (!Number.isNaN(t)) expires = Math.floor(t / 1000);
+      } else if (key === 'secure') secure = true;
+      else if (key === 'httponly') httpOnly = true;
+      else if (key === 'samesite') {
+        const s = val.toLowerCase();
+        sameSite = s === 'strict' ? 'Strict' : s === 'none' ? 'None' : 'Lax';
+      }
+    }
+    // A cookie may only be set for the responding host or a parent of it.
+    if (domain && host !== domain && !host.endsWith(`.${domain}`)) continue;
+    out.push({
+      name,
+      value,
+      domain: domain ? `.${domain}` : host,
+      path: cookiePath,
+      expires,
+      secure,
+      httpOnly,
+      ...(sameSite ? { sameSite } : {}),
+    });
+  }
+  return out;
+}
+
+/** Throws unless the URL is an ordinary public http(s) address. */
+export function assertPublicUrl(raw: string): URL {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new BlackboardError('INVALID_INPUT', 'That is not a valid web address.');
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+    throw new BlackboardError('INVALID_INPUT', `Only web links can be opened (got ${u.protocol}).`);
+  }
+  if (isPrivateHost(u.hostname)) {
+    throw new BlackboardError('INVALID_INPUT', 'Refusing to open a link to this computer or a private network.');
+  }
+  return u;
 }
 
 interface EvaluateResult {
@@ -83,6 +299,9 @@ const RESOLVE_QUIET_MS = 6_000;
 
 /** Ceiling on one hostname, for a page that keeps chattering without resolving. */
 const ORIGIN_CAP_MS = 25_000;
+
+/** A main-frame navigation to one of these is a file, not a page to render. */
+const FILE_PATH = /\.(pdf|docx?|pptx?|xlsx?|zip|mp4|mov|m4a|mp3|ipynb|csv|txt)$/i;
 
 /**
  * True when a URL is the file itself rather than an app or API route.
@@ -178,8 +397,53 @@ export class BlackboardSession implements BBHttp {
     return this.headless;
   }
 
+  private closed = false;
+
+  /** False once Chrome has gone away (crash, window closed, killed). */
+  isAlive(): boolean {
+    if (this.closed) return false;
+    try {
+      const browser = this.context.browser();
+      return browser ? browser.isConnected() : true;
+    } catch {
+      return false;
+    }
+  }
+
+  onClose(cb: () => void): void {
+    this.context.on('close', () => {
+      this.closed = true;
+      cb();
+    });
+  }
+
+  /**
+   * True when the last navigation never reached any web page: no network,
+   * DNS failure, or a timeout. Chrome leaves the tab on about:blank or its
+   * own error page in that case.
+   */
+  isOffline(): boolean {
+    try {
+      const url = this.worker && !this.worker.isClosed() ? this.worker.url() : this.context.pages()[0]?.url() ?? '';
+      return !/^https?:/.test(url);
+    } catch {
+      return false;
+    }
+  }
+
+  private workerBuilding: Promise<Page> | null = null;
+
   /** True once the worker page exists and sits on a real web page. */
   async ensureWorker(preferredOrigin?: string): Promise<Page> {
+    // Parallel requests share one rebuild instead of each opening a page.
+    if (this.workerBuilding) return this.workerBuilding;
+    this.workerBuilding = this.buildWorker(preferredOrigin).finally(() => {
+      this.workerBuilding = null;
+    });
+    return this.workerBuilding;
+  }
+
+  private async buildWorker(preferredOrigin?: string): Promise<Page> {
     if (this.worker && !this.worker.isClosed()) {
       const url = new URL(this.worker.url());
       // Any real page counts — including an SSO page the student is mid-way
@@ -330,10 +594,26 @@ export class BlackboardSession implements BBHttp {
     // that. No credential entry ever happens here.
     const page = await this.ensureWorker();
     await page.goto(SSO_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
-    await page
-      .waitForURL(/blackboard\.(syr|syracuse)\.edu\/(ultra|webapps\/portal)/, { timeout: 30_000 })
-      .catch(() => undefined);
-    await page.waitForTimeout(1500);
+    // Wait to land back on Blackboard, but give up as soon as the page has
+    // sat still on a non-Blackboard page (the sign-in form wanting a
+    // password). A silent re-sign-in hops through the provider in about a
+    // second per step; waiting the full 30 s made every "please log in"
+    // answer slow enough for the AI app to time out first.
+    const deadline = Date.now() + 30_000;
+    let lastUrl = '';
+    let stillSince = Date.now();
+    while (Date.now() < deadline) {
+      const now = page.url();
+      if (/blackboard\.(syr|syracuse)\.edu\/(ultra|webapps\/portal)/.test(now)) break;
+      if (now !== lastUrl) {
+        lastUrl = now;
+        stillSince = Date.now();
+      } else if (Date.now() - stillSince > 5_000) {
+        break;
+      }
+      await page.waitForTimeout(500).catch(() => undefined);
+    }
+    await page.waitForTimeout(1500).catch(() => undefined);
     const finalUrl = new URL(page.url());
     if (!isBlackboardHost(finalUrl) || looksLikeLoginPage(finalUrl)) return null;
     return this.probeCandidates();
@@ -420,12 +700,52 @@ export class BlackboardSession implements BBHttp {
   private async rememberAuthOrigin(origin: string): Promise<void> {
     this.authOrigin = origin;
     await writeMeta({ authOrigin: origin }).catch(() => undefined);
-    // Snapshot the authenticated cookies so the next launch stays signed in
-    // even though Blackboard's session cookie is browser-session scoped.
+    await this.saveSnapshot();
+  }
+
+  /**
+   * Snapshot the sign-in cookies so the next launch stays signed in even
+   * though Blackboard's session cookie is browser-session scoped.
+   *
+   * Only Blackboard's, the SU / Microsoft sign-in's, and sites the student
+   * deliberately signed into with `npm run connect` are written. Anything
+   * else the browser picked up while reading links stays out: copying it
+   * into a plain JSON file would only widen what that one file gives away
+   * if it ever leaked.
+   */
+  async saveSnapshot(): Promise<void> {
+    const extra = await connectedSites();
     await this.context
       .storageState()
-      .then((state) => saveCookies(state.cookies))
+      .then((state) => saveCookies(state.cookies.filter((c) => isSnapshotCookieDomain(c.domain, extra))))
       .catch(() => undefined);
+  }
+
+  /** Hostnames of the tabs open right now (the connect CLI records them). */
+  openPageHosts(): string[] {
+    try {
+      return this.context
+        .pages()
+        .map((p) => {
+          try {
+            return new URL(p.url()).hostname;
+          } catch {
+            return '';
+          }
+        })
+        .filter((h) => h !== '');
+    } catch {
+      return [];
+    }
+  }
+
+  /** How many tabs the window has open (the connect CLI waits for zero). */
+  openPageCount(): number {
+    try {
+      return this.context.pages().length;
+    } catch {
+      return 0;
+    }
   }
 
   private static async evaluateFetch(
@@ -459,29 +779,36 @@ export class BlackboardSession implements BBHttp {
   }
 
   async fetchJson(path: string, init: BBRequestInit = {}): Promise<BBJsonResponse> {
-    const url = this.toSameOriginUrl(path);
-    const payload = {
-      url,
-      init: { method: init.method ?? 'GET', headers: init.headers ?? {}, body: init.body },
-    };
+    const reqInit = { method: init.method ?? 'GET', headers: init.headers ?? {}, body: init.body };
     let page = await this.ensureWorker();
+    // Resolve against the page actually in use, after it exists: resolving
+    // first could aim at one Blackboard hostname while the page sits on the
+    // other, which the browser then blocks as cross-origin.
     let result: EvaluateResult;
     try {
-      result = await BlackboardSession.evaluateFetch(page, payload);
+      result = await BlackboardSession.evaluateFetch(page, { url: this.toSameOriginUrl(path), init: reqInit });
     } catch {
-      // Navigations can destroy the JS context mid-flight; rebuild once.
-      if (this.worker) {
-        try {
-          await this.worker.close();
-        } catch {
-          /* ignore */
-        }
-      }
-      this.worker = null;
+      // A navigation destroyed the page's script context mid-request. Let it
+      // settle and retry once on the same page. Closing it here (as before)
+      // also killed every other request running in parallel on it.
+      await page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => undefined);
       page = await this.ensureWorker();
-      result = await BlackboardSession.evaluateFetch(page, payload);
+      try {
+        result = await BlackboardSession.evaluateFetch(page, { url: this.toSameOriginUrl(path), init: reqInit });
+      } catch {
+        throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', 'Blackboard reloaded in the middle of a request. Please try again.');
+      }
     }
     if (result.error) {
+      // The page was bounced to the sign-in provider: that is an expired
+      // session, surfacing as a blocked cross-origin fetch.
+      let onBlackboard = true;
+      try {
+        onBlackboard = isBlackboardHost(new URL(page.url()));
+      } catch {
+        /* keep true */
+      }
+      if (!onBlackboard) throw BlackboardError.sessionExpired('the Blackboard page was sent to the sign-in page');
       throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `Blackboard request failed: ${result.error}`);
     }
     return { status: result.status, contentType: result.contentType, text: result.text, url: result.url };
@@ -494,15 +821,96 @@ export class BlackboardSession implements BBHttp {
   async fetchBuffer(pathOrUrl: string): Promise<BBBufferResponse> {
     await this.ensureWorker();
     const url = this.toSameOriginUrl(pathOrUrl);
-    const res = await this.context.request.get(url, { timeout: 90_000 });
-    const bytes = await res.body();
-    const headers = res.headers();
-    return {
-      status: res.status(),
-      contentType: headers['content-type'] ?? null,
-      bytes,
-      filename: parseContentDispositionFilename(headers['content-disposition']),
-    };
+    const res = await this.streamGet(url, { maxBytes: MAX_DOWNLOAD_BYTES, timeoutMs: 180_000, label: 'Attachment' });
+    return { status: res.status, contentType: res.contentType, bytes: res.bytes, filename: res.filename };
+  }
+
+  private userAgent: string | null = null;
+
+  /**
+   * GET with the browser's cookies, streaming the body so the size limit is
+   * enforced while downloading rather than after.
+   *
+   * Playwright's request API reads the whole response into memory before
+   * returning, so a 2 GB lecture recording was fully buffered (or timed out)
+   * before the 200 MB limit was ever checked. Redirects are followed one hop
+   * at a time so every hop can be checked (`checkHop`) and gets the cookies
+   * for its own host.
+   */
+  private async streamGet(
+    url: string,
+    opts: { maxBytes: number; timeoutMs: number; label: string; checkHop?: (u: URL) => void | Promise<void> },
+  ): Promise<ExternalResponse> {
+    if (!this.userAgent) {
+      const page = this.context.pages()[0];
+      this.userAgent = page ? await page.evaluate<string>('navigator.userAgent').catch(() => null) : null;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+    const tooBig = (mb?: number): BlackboardError =>
+      new BlackboardError(
+        'CONTENT_NOT_AVAILABLE',
+        `${opts.label} is too large to download (${mb ? `${mb} MB, ` : 'over '}limit ${Math.round(opts.maxBytes / 1024 / 1024)} MB).`,
+      );
+    try {
+      let current = url;
+      for (let hop = 0; hop < 10; hop += 1) {
+        await opts.checkHop?.(new URL(current));
+        const cookies = await this.context.cookies(current);
+        const headers: Record<string, string> = { Accept: '*/*' };
+        if (cookies.length > 0) headers.Cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+        if (this.userAgent) headers['User-Agent'] = this.userAgent;
+        let res: Response;
+        try {
+          res = await fetch(current, { headers, redirect: 'manual', signal: controller.signal });
+        } catch (err) {
+          if (controller.signal.aborted) throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `${opts.label} download timed out.`);
+          throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `${opts.label} download failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        // Keep cookies set along the way (share links often set one on the
+        // redirect and expect it on the next hop), exactly as the browser would.
+        const setCookies = res.headers.getSetCookie();
+        if (setCookies.length > 0) {
+          await this.context.addCookies(parseSetCookies(setCookies, current)).catch(() => undefined);
+        }
+        const location = res.headers.get('location');
+        if (res.status >= 300 && res.status < 400 && location) {
+          await res.body?.cancel().catch(() => undefined);
+          current = new URL(location, current).toString();
+          continue;
+        }
+        const declared = Number(res.headers.get('content-length') ?? '');
+        if (Number.isFinite(declared) && declared > opts.maxBytes) {
+          await res.body?.cancel().catch(() => undefined);
+          throw tooBig(Math.round(declared / 1024 / 1024));
+        }
+        const chunks: Buffer[] = [];
+        let total = 0;
+        if (res.body) {
+          const reader = res.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > opts.maxBytes) {
+              await reader.cancel().catch(() => undefined);
+              throw tooBig();
+            }
+            chunks.push(Buffer.from(value));
+          }
+        }
+        return {
+          status: res.status,
+          contentType: res.headers.get('content-type'),
+          bytes: Buffer.concat(chunks),
+          finalUrl: current,
+          filename: parseContentDispositionFilename(res.headers.get('content-disposition') ?? undefined),
+        };
+      }
+      throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `${opts.label} link redirected too many times.`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -645,26 +1053,151 @@ export class BlackboardSession implements BBHttp {
     if (!isFileCandidateUrl(parsed)) {
       throw new BlackboardError('INVALID_INPUT', `Refusing to fetch a download from ${parsed.hostname}${parsed.pathname}.`);
     }
-    const res = await this.context.request.get(url, { timeout: 180_000 });
-    const headers = res.headers();
-    const declared = Number(headers['content-length'] ?? '');
-    if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
-      throw new BlackboardError(
-        'CONTENT_NOT_AVAILABLE',
-        `Attachment is too large to download (${Math.round(declared / 1024 / 1024)} MB, limit ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB).`,
-      );
-    }
+    const res = await this.streamGet(url, { maxBytes: MAX_DOWNLOAD_BYTES, timeoutMs: 300_000, label: 'Attachment' });
     // An expired or unauthorized link comes back as an HTML page rather than a
     // 4xx, so treat HTML as "not the file" and let the caller move on.
-    if ((headers['content-type'] ?? '').includes('text/html')) {
+    if ((res.contentType ?? '').includes('text/html')) {
       throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Download URL returned a page instead of a file.');
     }
-    return {
-      status: res.status(),
-      contentType: headers['content-type'] ?? null,
-      bytes: await res.body(),
-      filename: parseContentDispositionFilename(headers['content-disposition']),
-    };
+    return { status: res.status, contentType: res.contentType, bytes: res.bytes, filename: res.filename };
+  }
+
+  readonly external: ExternalHttp = {
+    fetch: (url, opts) => this.fetchExternal(url, opts),
+    render: (url, opts) => this.renderExternal(url, opts),
+  };
+
+  /**
+   * GET an outside URL through the browser's cookie jar, following redirects
+   * one hop at a time so none of them can land on a private address.
+   */
+  private async fetchExternal(url: string, opts: { maxBytes?: number } = {}): Promise<ExternalResponse> {
+    return this.streamGet(assertPublicUrl(url).toString(), {
+      maxBytes: opts.maxBytes ?? MAX_DOWNLOAD_BYTES,
+      timeoutMs: 180_000,
+      label: 'That file',
+      checkHop: async (u) => {
+        await assertPublicDestination(u.toString());
+      },
+    });
+  }
+
+  /**
+   * Open an outside page in its own tab and read it the way a person would.
+   *
+   * Same guard rails as attachment capture: a navigation to a file is noted
+   * and aborted rather than allowed to become a browser download, requests to
+   * private addresses are refused, and video/audio streams are skipped since
+   * only the page (or its transcript) is wanted.
+   */
+  private async renderExternal(url: string, opts: RenderOptions = {}): Promise<RenderedPage> {
+    await assertPublicDestination(url);
+    const page = await this.context.newPage();
+    // Popups escape the page's request guard and can start downloads; a
+    // professor's page has no business opening new windows while being read.
+    page.on('popup', (p) => void p.close().catch(() => undefined));
+    await page
+      .routeWebSocket(/.*/, async (ws) => {
+        try {
+          if (await resolvesToPrivate(new URL(ws.url()).hostname)) {
+            await ws.close();
+            return;
+          }
+        } catch {
+          await ws.close().catch(() => undefined);
+          return;
+        }
+        ws.connectToServer();
+      })
+      .catch(() => undefined);
+    const captured: RenderedPage['captured'] = [];
+    const pendingCaptures: Promise<void>[] = [];
+    let fileUrl: string | undefined;
+    let lastActivity = Date.now();
+
+    await page.route('**/*', async (route, request) => {
+      lastActivity = Date.now();
+      try {
+        const u = new URL(request.url());
+        if ((u.protocol === 'http:' || u.protocol === 'https:') && (await resolvesToPrivate(u.hostname))) {
+          await route.abort();
+          return;
+        }
+        if (request.resourceType() === 'media') {
+          await route.abort();
+          return;
+        }
+        if (request.isNavigationRequest() && request.frame() === page.mainFrame() && FILE_PATH.test(u.pathname)) {
+          fileUrl ??= request.url();
+          await route.abort();
+          return;
+        }
+      } catch {
+        /* unparseable URL: ordinary traffic */
+      }
+      await route.continue().catch(() => undefined);
+    });
+    page.on('download', (d) => {
+      fileUrl ??= d.url();
+      void d.cancel().catch(() => undefined);
+    });
+    if (opts.capture) {
+      const pattern = opts.capture;
+      page.on('response', (r) => {
+        if (!pattern.test(r.url())) return;
+        pendingCaptures.push(
+          r
+            .text()
+            .then((body) => {
+              captured.push({ url: r.url(), status: r.status(), body: body.slice(0, 2_000_000) });
+            })
+            .catch(() => undefined),
+        );
+      });
+    }
+
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+      // Wait until the page stops fetching (most sites build their content
+      // with scripts after load), bounded so a chatty page cannot hang us.
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline && Date.now() - lastActivity < 1_500 && !fileUrl) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      while (Date.now() < deadline && Date.now() - lastActivity < 1_500) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (opts.settleMs) await page.waitForTimeout(opts.settleMs);
+      // A captured response that never finishes (a stream) must not hang the read.
+      await Promise.race([Promise.all(pendingCaptures), new Promise((r) => setTimeout(r, 5_000))]);
+
+      // A string, not a function: this project compiles without DOM types.
+      const read = await page
+        .evaluate<{ title: string; text: string; links: { url: string; label?: string }[] }>(`(() => ({
+          title: document.title,
+          text: document.body ? document.body.innerText : '',
+          links: Array.from(document.querySelectorAll('a[href]')).slice(0, 500).map((a) => ({
+            url: a.href,
+            label: (a.innerText || '').trim().slice(0, 200) || undefined,
+          })),
+        }))()`)
+        .catch(() => ({ title: '', text: '', links: [] as { url: string; label?: string }[] }));
+      let evaluated: unknown;
+      if (opts.evaluate) {
+        evaluated = await page.evaluate(opts.evaluate).catch(() => undefined);
+      }
+      return {
+        finalUrl: page.url(),
+        title: read.title,
+        text: read.text.slice(0, 2_000_000),
+        links: read.links.filter((l) => /^https?:/i.test(l.url)),
+        captured,
+        fileUrl,
+        evaluated,
+      };
+    } finally {
+      await page.close().catch(() => undefined);
+    }
   }
 
   /** Enforce same-origin so this session can never be used as a generic proxy. */
@@ -672,7 +1205,7 @@ export class BlackboardSession implements BBHttp {
     // Resolve relative paths against the page's own origin: after SSO the app
     // may sit on either Blackboard hostname, and the session cookies (and API)
     // live on that host.
-    let origin = BASE_URL;
+    let origin = this.authOrigin ?? BASE_URL;
     if (this.worker && !this.worker.isClosed()) {
       try {
         const current = new URL(this.worker.url());
@@ -711,20 +1244,49 @@ export class BlackboardSession implements BBHttp {
    */
   async markLoginWindow(): Promise<void> {
     const page = await this.ensureWorker();
-    await page
-      .evaluate(`(() => {
-        const title = '▶ SIGN IN HERE — blackboard-mcp';
-        if (document.title !== title) document.title = title;
-        if (document.body && !document.getElementById('bbmcp-login-banner')) {
-          const banner = document.createElement('div');
-          banner.id = 'bbmcp-login-banner';
-          banner.textContent = '▶ blackboard-mcp: sign in with your NetID + Duo in THIS window (it has no bookmarks bar — that is how you know)';
-          banner.style.cssText =
-            'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#c5221f;color:#fff;padding:12px 18px;font:600 15px/1.4 -apple-system,system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);';
-          document.body.appendChild(banner);
-        }
-      })()`)
-      .catch(() => undefined);
+    await markPage(page, 'sign in with your NetID + Duo in THIS window (it has no bookmarks bar — that is how you know)');
+  }
+
+  private signInTabs = 0;
+
+  /** True while a sign-in tab opened by openSignInTab is still open. */
+  hasOpenSignInTab(): boolean {
+    return this.signInTabs > 0;
+  }
+
+  /**
+   * Open a visible tab on a link that needs a sign-in, so the student can
+   * sign in right away instead of quitting their AI app. Only navigation and
+   * a banner: the student does every bit of typing. `onClosed` runs when the
+   * student closes the tab. While it is open, the sites it visits are
+   * remembered (like `npm run connect`) so their sign-in survives restarts.
+   */
+  async openSignInTab(url: string, service: string, onClosed: () => void): Promise<void> {
+    await assertPublicDestination(url);
+    const page = await this.context.newPage();
+    this.signInTabs += 1;
+    const hosts = new Set<string>();
+    const remember = (): void => {
+      try {
+        hosts.add(new URL(page.url()).hostname);
+      } catch {
+        /* not a web page yet */
+      }
+      void rememberConnectedSites([...hosts]).then(() => this.saveSnapshot());
+    };
+    const label = `sign in to ${service} in THIS tab, then close the tab and ask your AI again`;
+    const timer = setInterval(() => {
+      remember();
+      void markPage(page, label);
+    }, 2500);
+    page.on('close', () => {
+      clearInterval(timer);
+      this.signInTabs -= 1;
+      onClosed();
+    });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined);
+    await page.bringToFront().catch(() => undefined);
+    await markPage(page, label);
   }
 
   /** Bring the login window to the front (once, at start of the login flow). */
@@ -738,6 +1300,7 @@ export class BlackboardSession implements BBHttp {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     try {
       await this.context.close();
     } catch {

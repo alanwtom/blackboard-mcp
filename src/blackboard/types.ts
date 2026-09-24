@@ -1,3 +1,5 @@
+import type { LinkRef } from './links.js';
+
 /**
  * Normalized internal types. These are the shapes exposed to the MCP layer and
  * CLI. Raw Blackboard API payloads never leak past the blackboard/ modules.
@@ -29,6 +31,8 @@ export type ContentItemType =
   | 'survey'
   | 'link'
   | 'page'
+  /** An outside tool launched from Blackboard (McGraw Hill Connect, Gradescope, ...). */
+  | 'tool'
   | 'other';
 
 export type AttachmentSource = 'files-api' | 'description' | 'handler';
@@ -63,8 +67,12 @@ export interface ContentItem {
   pointsPossible?: number;
   hasChildren: boolean;
   attachments: AttachmentRef[];
+  /** Every web link in the item: its own target, plus links inside its text. */
+  links: LinkRef[];
   position?: number;
   modified?: string;
+  /** The gradebook column an Ultra assignment/test grades into, when stated. */
+  gradeColumnId?: string;
 }
 
 export interface Announcement {
@@ -73,12 +81,15 @@ export interface Announcement {
   title: string;
   bodyText: string;
   bodyHtml?: string;
+  /** Links inside the announcement text (Google Sheets, Zoom, readings...). */
+  links: LinkRef[];
   created?: string;
   modified?: string;
   url?: string;
 }
 
-export type AssignmentStatus = 'not_submitted' | 'submitted' | 'graded' | 'unknown';
+/** in_progress: started (e.g. a saved draft) but not handed in. */
+export type AssignmentStatus = 'not_submitted' | 'in_progress' | 'submitted' | 'graded' | 'unknown';
 
 export type AssignmentCategory = 'assignment' | 'test' | 'gradebook-column' | 'calendar-item';
 
@@ -96,9 +107,12 @@ export interface Assignment {
   status?: AssignmentStatus;
   category: AssignmentCategory;
   url?: string;
+  /** Gradebook column this assignment grades into, when known exactly. */
+  columnId?: string;
 }
 
-export type GradingStatus = 'graded' | 'not_graded' | 'exempt' | 'unknown';
+/** needs_grading: handed in, waiting for the instructor to grade it. */
+export type GradingStatus = 'graded' | 'needs_grading' | 'not_graded' | 'exempt' | 'unknown';
 
 export interface GradeEntry {
   /** Stable id: "<courseId>:<columnId>". */
@@ -108,6 +122,8 @@ export interface GradeEntry {
   title: string;
   dueDate?: string;
   score?: number;
+  /** The grade as Blackboard shows it, e.g. "Complete", "A-", "87.5%". */
+  display?: string;
   pointsPossible?: number;
   percentage?: number;
   feedback?: string;
@@ -137,4 +153,6 @@ export interface AttachmentSaveResult {
   mimeType?: string;
   /** Included for small text-like files so the agent can read inline. */
   textExcerpt?: string;
+  /** The downloaded bytes, kept in memory so the caller can read them as text. */
+  bytes?: Buffer;
 }

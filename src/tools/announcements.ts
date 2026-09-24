@@ -8,7 +8,7 @@ export function registerAnnouncementTools(server: McpServer, ctx: BBToolContext)
     'get_announcements',
     {
       title: 'Get Blackboard course announcements',
-      description: 'List announcements for one Blackboard course, newest first. Optionally filter to items created or modified after a date. Read-only.',
+      description: 'List announcements for one Blackboard course, newest first. Optionally filter to items created or modified after a date. Links inside an announcement are listed under "links"; open one with read_link. Read-only.',
       inputSchema: {
         course_id: z.string().describe('Blackboard course id from list_courses, e.g. "_26184_1" (course code also accepted).'),
         since: z.string().optional().describe('ISO date (e.g. "2026-08-01") — only announcements created/modified on or after this instant.'),
@@ -28,6 +28,7 @@ export function registerAnnouncementTools(server: McpServer, ctx: BBToolContext)
             id: a.id,
             title: a.title,
             body: a.bodyText,
+            links: a.links.map((l) => ({ url: l.url, label: l.label ?? null, kind: l.kind })),
             created: a.created,
             modified: a.modified,
             url: a.url,

@@ -40,7 +40,7 @@ async function connect(pre?: (http: FakeHttp) => void): Promise<Connected> {
 }
 
 describe('blackboard-mcp server', () => {
-  it('advertises all nine read-only tools', async () => {
+  it('advertises all ten read-only tools', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -54,6 +54,7 @@ describe('blackboard-mcp server', () => {
       'get_recent_updates',
       'get_upcoming_work',
       'list_courses',
+      'read_link',
     ]);
     for (const tool of tools) {
       expect(tool.annotations?.readOnlyHint).toBe(true);

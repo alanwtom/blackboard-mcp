@@ -1,4 +1,4 @@
-import { BlackboardError, truncate, isBlackboardError } from './errors.js';
+import { BlackboardError, truncate } from './errors.js';
 import type { BBHttp, BBJsonResponse } from './session.js';
 import { sleep } from './util.js';
 
@@ -37,17 +37,17 @@ export async function getJson<T = unknown>(
   path: string,
   opts: GetJsonOptions = {},
 ): Promise<T | null> {
-  let resp: BBJsonResponse;
-  try {
-    resp = await http.fetchJson(path);
-  } catch (err) {
-    if (isBlackboardError(err) && err.code === 'INVALID_INPUT') throw err;
-    throw err;
-  }
+  const resp: BBJsonResponse = await http.fetchJson(path);
 
-  // A 200 that is actually the login/SSO HTML page means the session is gone.
-  if (looksLikeHtml(resp)) {
-    throw BlackboardError.sessionExpired('Blackboard returned an HTML page instead of API data');
+  // Outages and maintenance pages are HTML too; check them before reading
+  // HTML as "signed out", or a Blackboard outage tells every student to log
+  // in again (and throws away a perfectly good session).
+  if (resp.status >= 500) {
+    throw new BlackboardError(
+      'BLACKBOARD_REQUEST_FAILED',
+      `Blackboard is having problems right now (HTTP ${resp.status}). Try again in a few minutes.`,
+      { status: resp.status },
+    );
   }
   if (resp.status === 401) {
     throw BlackboardError.sessionExpired(`HTTP 401 from ${apiLabel(path)}`);
@@ -66,6 +66,13 @@ export async function getJson<T = unknown>(
       opts.notFoundMessage ?? `Blackboard resource not found: ${apiLabel(path)} (HTTP 404)`,
       { status: 404 },
     );
+  }
+  // A 200 that is actually the login/SSO HTML page means the session is gone.
+  // Checked after the error statuses: an HTML 404 or 403 page is a missing
+  // or locked item, and reading it as "signed out" restarted a healthy
+  // browser and told the student to log in again.
+  if (looksLikeHtml(resp)) {
+    throw BlackboardError.sessionExpired('Blackboard returned an HTML page instead of API data');
   }
   if (resp.status === 429) {
     throw new BlackboardError(

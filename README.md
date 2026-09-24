@@ -10,28 +10,36 @@ It only sees what you can already see, and it can never submit, post, or change 
 
 ## Install (about 5 minutes, one time)
 
-Works on a Mac or a Windows PC.
+Works on a Mac or a Windows PC. Four steps:
 
 1. **Get Claude Desktop.** Download it from [claude.ai/download](https://claude.ai/download),
    install it, open it, and sign in. (It's free for Syracuse students.)
 2. **Download this file:**
    [**blackboard-mcp.mcpb**](https://github.com/alanwtom/blackboard-mcp/releases/latest/download/blackboard-mcp.mcpb)
-3. **Double-click the file you just downloaded.** Claude opens an install screen.
-   Click **Install**.
+   It goes into your **Downloads** folder.
+3. **Open your Downloads folder and double-click `blackboard-mcp.mcpb`.** Claude opens a
+   screen called **Blackboard (Syracuse)**.
+4. **Click the black Install button.** You will see a red box saying the extension "has not
+   been verified by Anthropic" and can access your computer. That is normal for any tool not
+   made by Anthropic itself; this one is a student project. It only reads your Blackboard and
+   the links your professors post, and it never submits or changes anything.
 
 That's it. The tool also needs Google Chrome or Microsoft Edge on your computer. Windows
 already has Edge, and most Macs already have Chrome. If yours doesn't, Claude will tell you
 and link you to the free Chrome download.
 
 > Double-click didn't open Claude? In Claude, open **Settings**, click **Extensions**, and drag
-> the downloaded file into that window.
+> `blackboard-mcp.mcpb` from your Downloads folder into that window.
 
 ## The first time you use it
 
 1. In Claude, ask: **"What do I have due this week?"**
-2. A browser window with a **red banner** across the top opens. Sign in there with your NetID
-   and approve Duo, like you always do.
-3. Ask your question again.
+2. A new browser window opens with a **red banner** across the top. It may open *behind*
+   Claude: if you don't see it, look for a new browser icon in your Dock (Mac) or taskbar
+   (Windows) and click it.
+3. Sign in there with your NetID and approve Duo, like you always do. The window closes by
+   itself when you're done.
+4. Ask your question again.
 
 You're done. You only sign in again when Blackboard logs you out, and when that happens the
 same red-banner window pops up by itself.

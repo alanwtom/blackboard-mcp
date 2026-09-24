@@ -1,0 +1,96 @@
+import { globalCache, TTL } from './cache.js';
+import { findCourse } from './courses.js';
+import { getGradebookColumns } from './assignments.js';
+import { getJson } from './transport.js';
+import { gradeCellDisplay, gradeCellScore, htmlToText, mapWithConcurrency, strField } from './util.js';
+const API_V2 = '/learn/api/public/v2';
+function extractScore(data) {
+    return gradeCellScore(data);
+}
+function extractFeedback(data) {
+    const fb = strField(data, 'feedback') ?? strField(data, 'attempt.feedback');
+    if (fb && fb.trim() !== '')
+        return htmlToText(fb) ?? fb.trim();
+    return undefined;
+}
+/** Normalized view of a student's grade cell for MCP output. */
+export function normalizeGradeCell(cell) {
+    const shown = gradeCellDisplay(cell);
+    return { score: shown.score, display: shown.text, feedback: extractFeedback(cell), gradingStatus: cellStatus(cell) };
+}
+function cellStatus(cell) {
+    if (cell.exempt === true)
+        return 'exempt';
+    if (extractScore(cell) !== undefined || strField(cell, 'displayGrade.text'))
+        return 'graded';
+    const status = (strField(cell, 'status') ?? '').replace(/[\s_-]/g, '').toLowerCase();
+    if (status === 'graded')
+        return 'graded';
+    if (status === 'needsgrading' || status === 'needsgradingagain')
+        return 'needs_grading';
+    return 'not_graded';
+}
+/**
+ * The student's own grades for one course. Only data Blackboard already shows
+ * the signed-in student is requested (v2 gradebook columns + the per-column
+ * "users/me" grade cell). Cached, and fetched a few columns at a time.
+ */
+export async function getGrades(http, courseId) {
+    const course = await findCourse(http, courseId);
+    const cacheKey = `grades:${course.id}`;
+    return globalCache.wrap(cacheKey, TTL.grades, async () => {
+        const columns = await getGradebookColumns(http, course.id);
+        // One grade cell per column, fetched a few at a time. A full gradebook
+        // used to cost a fixed delay plus a full round trip for every column in
+        // series, which is what made "what are my grades" the slowest question.
+        return mapWithConcurrency(columns, async (column) => {
+            const cell = await getJson(http, `${API_V2}/courses/${encodeURIComponent(course.id)}/gradebook/columns/${encodeURIComponent(column.id)}/users/me`, { allowNotFound: true }).catch(() => null);
+            const shown = cell ? gradeCellDisplay(cell) : {};
+            const score = shown.score;
+            // No cell at all means the request failed: that is "unknown", not "not graded".
+            const gradingStatus = cell ? cellStatus(cell) : 'unknown';
+            const pointsPossible = column.pointsPossible;
+            const percentage = score !== undefined && pointsPossible !== undefined && pointsPossible > 0
+                ? Math.round((score / pointsPossible) * 1000) / 10
+                : undefined;
+            return {
+                id: `${course.id}:${column.id}`,
+                courseId: course.id,
+                columnId: column.id,
+                title: column.name,
+                dueDate: column.dueDate,
+                score,
+                display: shown.text,
+                pointsPossible,
+                percentage,
+                feedback: cell ? extractFeedback(cell) : undefined,
+                gradingStatus,
+                modified: column.modified,
+            };
+        });
+    });
+}
+/** Read the student's grade cell for one column; returns undefined if absent. */
+export async function getGradeForColumn(http, courseId, columnId) {
+    const cell = await getJson(http, `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns/${encodeURIComponent(columnId)}/users/me`, { allowNotFound: true }).catch(() => null);
+    return cell ?? undefined;
+}
+/** Rubric metadata for a gradebook column, when the deployment exposes it. */
+export async function getRubricForColumn(http, courseId, columnId) {
+    const data = await getJson(http, `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns/${encodeURIComponent(columnId)}/rubrics`, { allowNotFound: true }).catch(() => null);
+    if (!data)
+        return [];
+    const results = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.results)
+            ? data.results
+            : [];
+    return results
+        .map((r) => {
+        const rec = r;
+        const id = strField(rec, 'id');
+        const title = strField(rec, 'title');
+        return id || title ? { id, title } : null;
+    })
+        .filter((r) => r !== null);
+}

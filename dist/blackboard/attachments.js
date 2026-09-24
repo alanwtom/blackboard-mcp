@@ -1,0 +1,274 @@
+import { globalCache, TTL } from './cache.js';
+import { BlackboardError, isBlackboardError, truncate } from './errors.js';
+import { isBlackboardHost } from './hosts.js';
+import { getJson } from './transport.js';
+import { MAX_DOWNLOAD_BYTES } from './session.js';
+import { asRecord, htmlToText, numField, strField } from './util.js';
+import { paths } from '../storage/session-store.js';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+const API = '/learn/api/public/v1';
+const TEXT_EXCERPT_MAX_BYTES = 256 * 1024;
+const TEXT_EXCERPT_CHARS = 4000;
+/**
+ * Extract /bbcswebdav/xid-... attachment links embedded in content HTML
+ * (common for documents that carry file chips in their body).
+ */
+export function extractWebdavLinks(html) {
+    const out = [];
+    const seen = new Set();
+    const anchor = /<a\b[^>]*href="([^"]*\/bbcswebdav\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = anchor.exec(html)) !== null) {
+        let href = m[1].replace(/&amp;/g, '&');
+        const label = htmlToText(m[2]);
+        const key = href.split('?')[0];
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        if (!href.startsWith('/')) {
+            try {
+                const u = new URL(href);
+                if (!isBlackboardHost(u))
+                    continue;
+                href = `${u.pathname}${u.search}`;
+            }
+            catch {
+                continue;
+            }
+        }
+        out.push({ url: href, fileName: label ?? undefined });
+    }
+    // Bare links without anchors (rare, e.g. plain-text bodies).
+    const bare = /["'(\s](\/bbcswebdav\/[A-Za-z0-9_\-./%]+[?][^"'\s)]+|\/bbcswebdav\/[A-Za-z0-9_\-./%]+)/g;
+    while ((m = bare.exec(html)) !== null) {
+        const href = m[1].replace(/&amp;/g, '&');
+        const key = href.split('?')[0];
+        if (!seen.has(key)) {
+            seen.add(key);
+            out.push({ url: href });
+        }
+    }
+    return out;
+}
+function normalizeFileEntry(raw, courseId, contentId) {
+    const rec = asRecord(raw) ?? {};
+    const fileId = strField(rec, 'id') ?? strField(rec, 'fileId');
+    const fileName = strField(rec, 'fileName') ?? strField(rec, 'name') ?? strField(rec, 'originalFileName');
+    if (!fileId && !fileName)
+        return null;
+    return {
+        fileId,
+        courseId,
+        contentId,
+        fileName,
+        mimeType: strField(rec, 'mimeType') ?? strField(rec, 'contentType'),
+        sizeBytes: numField(rec, 'sizeBytes') ?? numField(rec, 'size'),
+        url: strField(rec, 'url') ?? undefined,
+        source: 'files-api',
+    };
+}
+/**
+ * List attachments for one content item. Tries the Learn "content files"
+ * endpoints first, then falls back to /bbcswebdav links embedded in the item's
+ * HTML. Every failure mode degrades to an empty list, never a hard error —
+ * attachments are best-effort metadata.
+ */
+export async function listContentFiles(http, courseId, contentId, descriptionHtml) {
+    const cacheKey = `files:${courseId}:${contentId}`;
+    return globalCache.wrap(cacheKey, TTL.content, async () => {
+        const endpoints = [
+            `${API}/courses/${encodeURIComponent(courseId)}/contents/${encodeURIComponent(contentId)}/files`,
+            `${API}/courses/${encodeURIComponent(courseId)}/contents/${encodeURIComponent(contentId)}/attachments`,
+        ];
+        for (const endpoint of endpoints) {
+            const data = await getJson(http, endpoint, { allowNotFound: true });
+            if (data === null)
+                continue;
+            const results = Array.isArray(data) ? data : Array.isArray(data?.results)
+                ? data.results
+                : null;
+            if (results && results.length > 0) {
+                const refs = results
+                    .map((r) => normalizeFileEntry(r, courseId, contentId))
+                    .filter((r) => r !== null);
+                if (refs.length > 0)
+                    return refs;
+            }
+        }
+        if (descriptionHtml) {
+            return extractWebdavLinks(descriptionHtml).map((link) => ({
+                courseId,
+                contentId,
+                fileName: link.fileName,
+                url: link.url,
+                source: 'description',
+            }));
+        }
+        return [];
+    });
+}
+/** Resolve a concrete same-origin URL for downloading one attachment. */
+export async function resolveAttachmentUrl(http, courseId, contentId, fileId) {
+    const refs = await listContentFiles(http, courseId, contentId);
+    if (refs.length === 0) {
+        throw new BlackboardError('ATTACHMENT_NOT_FOUND', `No attachments found for content ${contentId} in course ${courseId}.`);
+    }
+    const chosen = fileId ? refs.find((r) => r.fileId === fileId) : refs[0];
+    if (!chosen) {
+        throw new BlackboardError('ATTACHMENT_NOT_FOUND', `Attachment "${fileId}" not found on content ${contentId}. Available files: ${refs
+            .map((r) => r.fileName ?? r.fileId ?? '(unnamed)')
+            .join(', ')}`);
+    }
+    if (!chosen.url && chosen.fileId) {
+        // Ask Learn to hand back a signed download URL for this attachment id.
+        //
+        // Do NOT try to build a /bbcswebdav/xid-<fileId> path here. A file id and a
+        // webdav xid are unrelated numbering schemes for the same file, so the
+        // guessed path does not 404 — it resolves to whichever *other* file happens
+        // to own that xid, which means a download that reports success while
+        // handing the student a stranger's file from an unrelated course.
+        chosen.url =
+            `${API}/courses/${encodeURIComponent(courseId)}` +
+                `/contents/${encodeURIComponent(contentId)}` +
+                `/attachments/${encodeURIComponent(chosen.fileId)}/download`;
+    }
+    if (!chosen.url) {
+        throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Attachment has no downloadable URL.');
+    }
+    return chosen;
+}
+const TEXTY_EXT = new Set(['.txt', '.md', '.csv', '.json', '.html', '.htm', '.xml', '.log', '.srt', '.vtt']);
+function isTexty(fileName, mimeType) {
+    if (mimeType && (mimeType.startsWith('text/') || mimeType === 'application/json'))
+        return true;
+    const ext = path.extname(fileName).toLowerCase();
+    return TEXTY_EXT.has(ext);
+}
+/**
+ * Characters Windows forbids in a file name. The colon is the dangerous one:
+ * NTFS reads "Week 3: Notes.pdf" as an alternate data stream on a file named
+ * "Week 3", so the download reports success while the bytes land somewhere
+ * the student can never open. Blackboard names files like that constantly.
+ */
+const WINDOWS_RESERVED_CHARS = /[<>:"|?*]/g;
+/** MS-DOS device names, still unusable as file names on modern Windows. */
+const WINDOWS_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+/**
+ * Keep files inside the managed downloads root; never trust server names.
+ * Sanitizing to the strictest supported platform (Windows) on every platform
+ * keeps one downloads folder portable between machines.
+ */
+export function sanitizeFileName(name) {
+    // Treat backslashes as separators too, then take only the final segment.
+    const normalized = name.replace(/[\\/]+/g, '/');
+    const ext = path.posix.extname(normalized).toLowerCase().slice(0, 12);
+    const base = path.posix.basename(normalized).replace(/[\u0000-\u001f]/g, '').trim()
+        .replace(WINDOWS_RESERVED_CHARS, '-')
+        // Windows silently strips trailing dots and spaces, quietly turning one
+        // name into a different one.
+        .replace(/[. ]+$/, '');
+    let clean = base === '' || base === '.' || base === '..' ? 'attachment' : base;
+    if (WINDOWS_DEVICE_NAMES.test(path.posix.basename(clean, path.posix.extname(clean)))) {
+        clean = `_${clean}`;
+    }
+    if (clean.length > 120) {
+        clean = clean.slice(0, 120 - ext.length) + ext;
+    }
+    return clean;
+}
+function safeJoin(root, ...parts) {
+    const resolved = path.resolve(root, ...parts);
+    const normalizedRoot = path.resolve(root) + path.sep;
+    if (resolved !== path.resolve(root) && !resolved.startsWith(normalizedRoot)) {
+        throw new BlackboardError('INVALID_INPUT', 'Refusing to save outside the blackboard-mcp downloads directory.');
+    }
+    return resolved;
+}
+/**
+ * Download one resolved attachment reference (e.g. from a content item's
+ * handler data — the /ultra/redirect link resolves to the actual bytes).
+ */
+export async function downloadAttachmentRef(http, ref, opts = {}) {
+    let url = ref.url;
+    if (!url && ref.courseId && ref.contentId) {
+        // Folder-expanded items and files-api refs omit the links array; the
+        // redirect pattern is stable, so rebuild it from the ids.
+        const parent = ref.parentId ? `&parentId=${encodeURIComponent(ref.parentId)}` : '';
+        url = `/ultra/redirect?redirectType=nautilus&courseId=${encodeURIComponent(ref.courseId)}&contentId=${encodeURIComponent(ref.contentId)}${parent}`;
+    }
+    if (!url) {
+        throw new BlackboardError('ATTACHMENT_NOT_FOUND', 'Attachment has no downloadable URL.');
+    }
+    // /ultra/redirect links resolve through the Ultra SPA at runtime; let the
+    // authenticated page follow it and capture the file response.
+    const resp = url.includes('/ultra/redirect')
+        ? await http.captureRedirectDownload(url)
+        : await http.fetchBuffer(url);
+    if (resp.status !== 200) {
+        throw new BlackboardError(resp.status === 404 ? 'ATTACHMENT_NOT_FOUND' : 'BLACKBOARD_REQUEST_FAILED', `Attachment download failed (HTTP ${resp.status}).`, { status: resp.status });
+    }
+    // Backstop: the fetch layer already refuses anything whose declared size is
+    // over the ceiling, but a response without Content-Length gets here unchecked.
+    if (resp.bytes.length > MAX_DOWNLOAD_BYTES) {
+        throw new BlackboardError('CONTENT_NOT_AVAILABLE', `Attachment is too large to download (over ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB).`);
+    }
+    const rawName = opts.fileName ?? ref.fileName ?? resp.filename ?? `attachment-${ref.contentId}`;
+    const result = await saveToDownloads(resp.bytes, rawName, opts.subfolder, resp.contentType ?? ref.mimeType);
+    result.bytes = resp.bytes;
+    return result;
+}
+/**
+ * Write bytes into the downloads folder under a safe, non-clashing name.
+ * Existing files are never overwritten: a second copy gets "-1", "-2", ...
+ */
+export async function saveToDownloads(bytes, rawName, subfolder, mimeType) {
+    const fileName = sanitizeFileName(rawName);
+    const dir = subfolder
+        ? safeJoin(paths.downloadsDir, sanitizeFileName(subfolder))
+        : safeJoin(paths.downloadsDir);
+    await fs.mkdir(dir, { recursive: true });
+    let target = safeJoin(dir, fileName);
+    let counter = 1;
+    while (true) {
+        try {
+            await fs.access(target);
+            target = safeJoin(dir, fileName.replace(/(\.[^.]*)?$/, `-${counter}$1`));
+            counter += 1;
+        }
+        catch {
+            break;
+        }
+    }
+    await fs.writeFile(target, bytes);
+    const result = {
+        path: target,
+        fileName: path.basename(target),
+        sizeBytes: bytes.length,
+        mimeType: mimeType ?? undefined,
+    };
+    if (isTexty(result.fileName, result.mimeType) && bytes.length <= TEXT_EXCERPT_MAX_BYTES) {
+        result.textExcerpt = truncate(bytes.toString('utf8'), TEXT_EXCERPT_CHARS);
+    }
+    return result;
+}
+/**
+ * Download one course attachment into ~/.blackboard-mcp/downloads/. Files are
+ * saved locally only when explicitly requested by a tool call — nothing is
+ * uploaded anywhere, ever.
+ */
+export async function downloadAttachment(http, opts) {
+    const ref = await resolveAttachmentUrl(http, opts.courseId, opts.contentId, opts.fileId);
+    const save = { fileName: opts.fileName, subfolder: opts.subfolder };
+    try {
+        return await downloadAttachmentRef(http, ref, save);
+    }
+    catch (err) {
+        // Some items are listed by the attachments API but won't serve bytes
+        // through it. Dropping the url falls back to the /ultra/redirect content
+        // link, which still resolves for those.
+        if (!isBlackboardError(err) || err.code !== 'ATTACHMENT_NOT_FOUND')
+            throw err;
+        return downloadAttachmentRef(http, { ...ref, url: undefined }, save);
+    }
+}

@@ -6,7 +6,7 @@ import { getCourseContent } from '../blackboard/content.js';
 import { findCourse } from '../blackboard/courses.js';
 import { extractText, textWindow, type ExtractedText } from '../blackboard/extract.js';
 import type { AttachmentRef, AttachmentSaveResult } from '../blackboard/types.js';
-import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
 
 const TEXT_CACHE_MS = 20 * 60_000;
 
@@ -85,14 +85,16 @@ export function registerAttachmentTools(server: McpServer, ctx: BBToolContext): 
           total_chars: page?.total_chars,
           next_offset: page?.next_offset ?? null,
           available_files: available.map((a) => ({ file_id: a.fileId ?? null, file_name: a.fileName ?? null })),
-          note: [
-            page ? null : 'This file type has no readable text (for example an image or video); it was saved locally.',
+          ...limitations([
+            page
+              ? undefined
+              : extracted && !extracted.text
+                ? `This file has no readable text (${extracted.format}), so its contents could not be read. It was saved at the path above for the student to open.`
+                : 'This kind of file (for example an image, video or audio) has no text to read. It was saved at the path above for the student to open.',
             !args.file_id && others.length > 0
-              ? `This item has ${available.length} files; this is the first. Pass file_id (or a file_name from available_files) for the others.`
-              : null,
-          ]
-            .filter(Boolean)
-            .join(' ') || undefined,
+              ? `This item has ${available.length} files and only the first was read. Ask for the others by name: ${others.map((o) => o.fileName ?? o.fileId).join(', ')}.`
+              : undefined,
+          ]),
         });
       } catch (err) {
         return errorResult(err);

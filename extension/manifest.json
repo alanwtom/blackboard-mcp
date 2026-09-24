@@ -1,0 +1,39 @@
+{
+  "manifest_version": "0.3",
+  "name": "blackboard-mcp",
+  "display_name": "Blackboard (Syracuse)",
+  "version": "0.0.0",
+  "description": "Ask Claude about your own Syracuse Blackboard: what's due, grades, announcements, course files, and the links your professors post.",
+  "long_description": "Read-only. It signs in as you, in a browser window with a red banner where you type your NetID and Duo yourself, so it only sees what you can already see, and it can never submit, post, or change anything. Everything stays on your computer. Not affiliated with Syracuse University or Anthology/Blackboard.",
+  "author": { "name": "Alan Tom" },
+  "repository": { "type": "git", "url": "https://github.com/alanwtom/blackboard-mcp" },
+  "homepage": "https://github.com/alanwtom/blackboard-mcp",
+  "support": "https://github.com/alanwtom/blackboard-mcp/issues",
+  "license": "MIT",
+  "icon": "icon.png",
+  "keywords": ["blackboard", "syracuse", "student", "courses", "grades", "assignments"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"]
+    }
+  },
+  "tools": [
+    { "name": "get_upcoming_work", "description": "What's due, across all courses, with submission status" },
+    { "name": "get_recent_updates", "description": "New announcements, content and grades since a date" },
+    { "name": "list_courses", "description": "Your Blackboard courses" },
+    { "name": "get_course_content", "description": "A course's folders, files, assignments and links" },
+    { "name": "get_announcements", "description": "A course's announcements, with their links" },
+    { "name": "get_assignments", "description": "Assignments with due dates and status" },
+    { "name": "get_assignment_context", "description": "Everything about one assignment" },
+    { "name": "get_grades", "description": "Your grades in a course" },
+    { "name": "get_attachment", "description": "Read a course file (PDF, Word, PowerPoint, Excel...)" },
+    { "name": "read_link", "description": "Read a link a professor posted (Google Docs/Sheets, videos, PDFs...)" }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": { "node": ">=22.0.0" }
+  }
+}

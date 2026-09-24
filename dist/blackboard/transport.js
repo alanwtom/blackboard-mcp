@@ -1,0 +1,105 @@
+import { BlackboardError, truncate } from './errors.js';
+import { sleep } from './util.js';
+/**
+ * Generic helpers over the authenticated transport: JSON classification,
+ * pagination, and courtesy pacing. All domain modules go through these so
+ * error handling and request volume stay consistent.
+ */
+const PAGE_DELAY_MS = 200;
+const MAX_PAGES = 25;
+const MAX_RESULTS = 2000;
+function apiLabel(path) {
+    const q = path.indexOf('?');
+    return q === -1 ? path : path.slice(0, q);
+}
+function looksLikeHtml(resp) {
+    const ct = resp.contentType ?? '';
+    if (ct.includes('html'))
+        return true;
+    const head = resp.text.slice(0, 200).trimStart().toLowerCase();
+    return head.startsWith('<!doctype') || head.startsWith('<html');
+}
+export async function getJson(http, path, opts = {}) {
+    const resp = await http.fetchJson(path);
+    // Outages and maintenance pages are HTML too; check them before reading
+    // HTML as "signed out", or a Blackboard outage tells every student to log
+    // in again (and throws away a perfectly good session).
+    if (resp.status >= 500) {
+        throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `Blackboard is having problems right now (HTTP ${resp.status}). Try again in a few minutes.`, { status: resp.status });
+    }
+    if (resp.status === 401) {
+        throw BlackboardError.sessionExpired(`HTTP 401 from ${apiLabel(path)}`);
+    }
+    if (resp.status === 403) {
+        throw new BlackboardError('PERMISSION_DENIED', 'Blackboard will not show this to your account. Courses from past terms are usually locked by the university; ' +
+            'for a current course, the instructor may have hidden this part.', { status: 403 });
+    }
+    if (resp.status === 404) {
+        if (opts.allowNotFound)
+            return null;
+        throw new BlackboardError(opts.notFoundCode ?? 'BLACKBOARD_REQUEST_FAILED', opts.notFoundMessage ?? `Blackboard resource not found: ${apiLabel(path)} (HTTP 404)`, { status: 404 });
+    }
+    // A 200 that is actually the login/SSO HTML page means the session is gone.
+    // Checked after the error statuses: an HTML 404 or 403 page is a missing
+    // or locked item, and reading it as "signed out" restarted a healthy
+    // browser and told the student to log in again.
+    if (looksLikeHtml(resp)) {
+        throw BlackboardError.sessionExpired('Blackboard returned an HTML page instead of API data');
+    }
+    if (resp.status === 429) {
+        throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', 'Blackboard rate limit hit (HTTP 429). Wait a moment before retrying — this tool intentionally keeps request volume low.', { status: 429 });
+    }
+    if (resp.status >= 400) {
+        const snippet = truncate(resp.text, 160);
+        throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `Blackboard API request failed for ${apiLabel(path)} (HTTP ${resp.status}): ${snippet}`, { status: resp.status });
+    }
+    try {
+        return JSON.parse(resp.text);
+    }
+    catch {
+        throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', `Blackboard returned non-JSON data for ${apiLabel(path)}. The sign-in may have expired; ask again.`);
+    }
+}
+/** Extract the results array from a paged (`{results, paging}`) or plain response. */
+function extractResults(data) {
+    if (Array.isArray(data))
+        return { results: data };
+    if (data !== null && typeof data === 'object') {
+        const rec = data;
+        const results = Array.isArray(rec.results) ? rec.results : null;
+        if (results) {
+            const paging = rec.paging;
+            const nextPage = paging?.nextPage;
+            const href = typeof nextPage?.href === 'string' ? nextPage.href : undefined;
+            return { results, nextHref: href };
+        }
+        return { results: [data] };
+    }
+    throw new BlackboardError('BLACKBOARD_REQUEST_FAILED', 'Unexpected response shape from Blackboard API.');
+}
+/**
+ * Walk a Blackboard paged endpoint following `paging.nextPage.href`, with a
+ * small courtesy delay between pages and hard caps so we never hammer Blackboard.
+ */
+export async function getPaged(http, path, opts = {}) {
+    const maxPages = opts.maxPages ?? MAX_PAGES;
+    const maxResults = opts.maxResults ?? MAX_RESULTS;
+    let next = path;
+    const out = [];
+    for (let page = 0; page < maxPages; page++) {
+        const data = await getJson(http, next, {
+            notFoundCode: opts.notFoundCode,
+            notFoundMessage: opts.notFoundMessage,
+        });
+        const { results, nextHref } = extractResults(data);
+        out.push(...results);
+        if (out.length >= maxResults)
+            break;
+        if (!nextHref)
+            break;
+        next = http.toSameOriginPath(nextHref);
+        if (page < maxPages - 1)
+            await sleep(PAGE_DELAY_MS);
+    }
+    return out;
+}

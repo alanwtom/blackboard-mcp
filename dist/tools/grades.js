@@ -1,0 +1,46 @@
+import { z } from 'zod';
+import { getGrades } from '../blackboard/grades.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS } from './util.js';
+export function registerGradeTools(server, ctx) {
+    server.registerTool('get_grades', {
+        title: 'Get Blackboard grades',
+        description: 'List the student’s own grades for one Blackboard course: assignment, score, points possible, percentage, ' +
+            'feedback, and grading status. Only grades visible to the signed-in student are returned. Read-only.',
+        inputSchema: {
+            course_id: z.string().describe('Blackboard course id from list_courses, e.g. "_26184_1" (course code also accepted).'),
+        },
+        annotations: READ_ONLY_ANNOTATIONS,
+    }, async (args) => {
+        try {
+            const grades = await ctx.callBB((http) => getGrades(http, args.course_id));
+            const graded = grades.filter((g) => g.gradingStatus === 'graded');
+            const unknown = grades.filter((g) => g.gradingStatus === 'unknown');
+            return jsonResult({
+                course_id: args.course_id,
+                count: grades.length,
+                graded_count: graded.length,
+                grades: grades.map((g) => ({
+                    grade_id: g.id,
+                    title: g.title,
+                    score: g.score,
+                    grade_display: g.display,
+                    points_possible: g.pointsPossible,
+                    percentage: g.percentage,
+                    grading_status: g.gradingStatus,
+                    feedback: g.feedback,
+                    due_date: g.dueDate,
+                    modified: g.modified,
+                })),
+                ...limitations([
+                    unknown.length > 0
+                        ? `Blackboard did not answer for ${unknown.map((g) => `"${g.title}"`).join(', ')}, so ${unknown.length === 1 ? 'that grade is' : 'those grades are'} unknown here (not zero). Check the Grades page in Blackboard.`
+                        : undefined,
+                    'Only grades the instructor has released to students are visible; a hidden grade looks the same as no grade.',
+                ]),
+            });
+        }
+        catch (err) {
+            return errorResult(err);
+        }
+    });
+}

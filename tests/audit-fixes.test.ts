@@ -231,7 +231,7 @@ describe('read_link', () => {
     const { data } = await call(client, 'read_link', { url: 'https://docs.google.com/document/d/PRIVATEDOC123/edit', course_id: '_26184_1' });
     expect(data.status).toBe('needs_sign_in');
     expect(opened).toEqual([['https://docs.google.com/document/d/PRIVATEDOC123/edit', 'Google']]);
-    expect(data.note).toContain('Chrome window has opened');
+    expect(data.limitations.join(' ')).toContain('browser window has opened');
   });
 
   it('never opens a live Zoom meeting link', async () => {
@@ -337,5 +337,62 @@ describe('attachments', () => {
     const { data, isError } = await call(client, 'get_attachment', { course_id: '_26184_1', content_id: '_6000_1' });
     expect(isError).toBe(false);
     expect(data.text).toBe('Grading: 40% exams');
+  });
+});
+
+describe('gaps are always pointed out', () => {
+  it('tells every AI app, on connect, to relay gaps and what the server cannot see', async () => {
+    const { client } = await connect();
+    const instructions = client.getInstructions() ?? '';
+    expect(instructions).toContain('"limitations"');
+    expect(instructions).toMatch(/YouTube transcripts/);
+    expect(instructions).toMatch(/discussion boards/);
+  });
+
+  it('a YouTube link that came back without a transcript says so as a limitation', async () => {
+    const { client } = await connect((http) => {
+      http.external = {
+        fetch: async (u) => ({ status: 200, contentType: 'text/html', bytes: Buffer.from('<html></html>'), finalUrl: u }),
+        render: async (u) => ({
+          finalUrl: u,
+          title: 'Lecture',
+          text: '',
+          links: [],
+          captured: [],
+          evaluated: { title: 'Lecture 1', author: 'Prof', seconds: 600, lines: [] },
+        }),
+      };
+      http.on(/courses\/_26184_1\/announcements/, () => ({
+        json: { results: [announcement('_a1_1', 'Watch', iso(-DAY), '<a href="https://www.youtube.com/watch?v=aircAruvnKk">video</a>')] },
+      }));
+    });
+    const { data } = await call(client, 'read_link', { url: 'https://www.youtube.com/watch?v=aircAruvnKk', course_id: '_26184_1' });
+    expect(data.status).toBe('ok');
+    expect(data.limitations.join(' ')).toMatch(/does not hand transcripts/);
+  });
+
+  it('what’s-new always admits it can miss grades on older items', async () => {
+    const { client } = await connect();
+    const { data } = await call(client, 'get_recent_updates', {});
+    expect(data.limitations.join(' ')).toMatch(/grade entered on an older item can be missed/);
+  });
+
+  it('course content names items that open in outside tools', async () => {
+    const { client } = await connect((http) => {
+      http.on(/courses\/_26184_1\/contents\?limit=100$/, () => ({
+        json: { results: [{ id: '_7000_1', title: 'Connect Homework 1', contentHandler: { id: 'resource/x-bb-blti-link', url: 'https://connect.mheducation.com/lti' } }] },
+      }));
+    });
+    const { data } = await call(client, 'get_course_content', { course_id: '_26184_1' });
+    expect(data.limitations.join(' ')).toContain('"Connect Homework 1" opens in an outside tool');
+  });
+
+  it('unknown submission status is called out, never shown as missing work', async () => {
+    const { client } = await connect((http) => {
+      http.on(/gradebook\/columns\/_c1_1\/users\/me$/, () => ({ status: 404, json: { message: 'none' } }));
+    });
+    const { data } = await call(client, 'get_assignments', { course_id: '_26184_1', include_status: true });
+    expect(data.assignments[0].status).toBe('unknown');
+    expect(data.limitations.join(' ')).toMatch(/did not say whether 1 item was handed in/);
   });
 });

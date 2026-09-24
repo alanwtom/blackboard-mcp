@@ -8,11 +8,12 @@ import { BlackboardSession } from '../blackboard/session.js';
 import { isBlackboardError } from '../blackboard/errors.js';
 import { hasSession, paths, writeMeta } from '../storage/session-store.js';
 import {
+  BROWSER_NAMES,
   IS_WINDOWS,
-  chromeInstallCandidates,
   claudeDesktopConfigPath,
   findExecutable,
-  isChromeInstalled,
+  installedBrowsers,
+  isBrowserInstalled,
   localTscScript,
   quitAppHint,
   runCommand,
@@ -38,23 +39,44 @@ function projectRoot(): string {
 
 function checkNode(): boolean {
   const major = Number(process.versions.node.split('.')[0]);
-  if (major >= 20) {
+  // 22, not 20: the PDF reader needs it, and on older Node every PDF would
+  // quietly come back "unreadable". Node 20 stopped getting updates in 2026.
+  if (major >= 22) {
     ok(`Node.js v${process.versions.node}`);
     return true;
   }
-  warn(`Node.js v${process.versions.node} is too old (20 or newer required).`);
+  warn(`Node.js v${process.versions.node} is too old (22 or newer required).`);
   console.log('       Download the LTS version from https://nodejs.org, then run setup again.');
   return false;
 }
 
-function checkChrome(): boolean {
-  if (isChromeInstalled()) {
-    ok('Google Chrome installed');
+/**
+ * A browser the tool can drive: Chrome or Edge if either is installed (every
+ * Windows PC has Edge), otherwise offer to download a private Chromium that
+ * only this tool uses — the usual case for a Safari-only Mac.
+ */
+async function checkBrowser(): Promise<boolean> {
+  const found = installedBrowsers();
+  if (found.length > 0) {
+    ok(`Browser: ${BROWSER_NAMES[found[0]!]}`);
     return true;
   }
-  warn('Google Chrome was not found.');
-  console.log('       Install it from https://www.google.com/chrome/ and run setup again.');
-  console.log(`       Looked in: ${chromeInstallCandidates().join(', ')}`);
+  warn('Neither Google Chrome nor Microsoft Edge is installed.');
+  console.log('       blackboard-mcp can download its own copy of Chromium (the open-source base of Chrome).');
+  console.log('       It is used only by this tool, never as your everyday browser. A 150 MB download (about 360 MB on disk), one time.');
+  if (!(await askYesNo('Download it now?'))) {
+    console.log('       Or install Google Chrome from https://www.google.com/chrome/, then run setup again.');
+    return false;
+  }
+  const cli = path.join(projectRoot(), 'node_modules', 'playwright', 'cli.js');
+  // --no-shell: the tool runs the full browser even when hidden, so the
+  // separate "headless shell" download would be wasted space.
+  const result = runCommand(process.execPath, [cli, 'install', '--no-shell', 'chromium'], { cwd: projectRoot(), stdio: 'inherit' });
+  if (result.status === 0 && isBrowserInstalled('chromium')) {
+    ok(`Browser: ${BROWSER_NAMES.chromium}`);
+    return true;
+  }
+  warn('The download did not finish. Check your internet connection and run setup again, or install Google Chrome.');
   return false;
 }
 
@@ -64,13 +86,15 @@ function checkBuilt(): boolean {
     ok('Project is built');
     return true;
   }
+  // The built files ship with the project, so this only happens in a copy
+  // that lost them; students get only the runtime packages, not the compiler.
   warn('Project is not built yet. Attempting to build (takes a moment)...');
   // Run the compiler that npm install already placed in node_modules. Going
   // through `npx` would mean spawning npx.cmd on Windows, which Node refuses
   // to execute directly.
   const tsc = localTscScript(projectRoot());
   if (!tsc) {
-    warn('Could not find the TypeScript compiler. Run `npm install`, then `npm run build`.');
+    warn('The project files look incomplete. Download the project again (or run `npm install`, then `npm run build`).');
     return false;
   }
   const result = runCommand(process.execPath, [tsc, '-p', 'tsconfig.json'], {
@@ -98,9 +122,23 @@ function nodeCommand(): string {
 
 const serverScript = (): string => path.join(projectRoot(), 'dist', 'index.js');
 
+/** Whether the one-click Blackboard extension is already installed in Claude Desktop. */
+function hasBlackboardExtension(configDir: string): boolean {
+  try {
+    return fs.readdirSync(path.join(configDir, 'Claude Extensions')).some((name) => name.includes('blackboard-mcp'));
+  } catch {
+    return false;
+  }
+}
+
 function configureClaudeDesktop(): boolean {
   const configPath = claudeDesktopConfigPath();
   const configDir = path.dirname(configPath);
+  // Adding it here as well would make every Blackboard tool appear twice.
+  if (hasBlackboardExtension(configDir)) {
+    ok('Claude Desktop already has the Blackboard extension installed');
+    return true;
+  }
   const hasConfigFile = fs.existsSync(configPath);
   // The app's own folder is the reliable sign that it is installed. The config
   // file itself only appears once the student has opened Developer settings,
@@ -198,7 +236,7 @@ async function checkSession(): Promise<boolean> {
 }
 
 async function runLogin(): Promise<boolean> {
-  console.log('\n  Opening a Chrome window for you to sign in.');
+  console.log('\n  Opening a browser window for you to sign in.');
   console.log('  Use the window with the RED BANNER. Sign in with your NetID and approve Duo.');
   console.log('  This tool never sees or stores your password or Duo codes.');
   const session = await BlackboardSession.acquire({ headless: false });
@@ -236,7 +274,7 @@ async function main(): Promise<number> {
   console.log('');
 
   console.log('Step 1 of 4: dependencies');
-  const depsOk = checkNode() && checkChrome() && checkBuilt();
+  const depsOk = checkNode() && (await checkBrowser()) && checkBuilt();
 
   console.log('\nStep 2 of 4: connecting your AI assistant');
   if (await askYesNo('Connect Claude Desktop automatically?')) configureClaudeDesktop();

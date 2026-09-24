@@ -9,7 +9,7 @@ import { listContentFiles } from '../blackboard/attachments.js';
 import { BlackboardError } from '../blackboard/errors.js';
 import type { AssignmentStatus, ContentItem, Course } from '../blackboard/types.js';
 import { endOfSchoolDay, mapWithConcurrency, parseBBDate, parseWindowBound, slugify, titlesMatch } from '../blackboard/util.js';
-import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS, UNKNOWN_STATUS_GAP, type BBToolContext } from './util.js';
 
 const MAX_COURSES_FOR_SWEEPS = 20;
 const DAY_MS = 24 * 3600_000;
@@ -82,13 +82,20 @@ export function registerStudentTools(server: McpServer, ctx: BBToolContext): voi
         const overdue = windowed.filter(
           (a) => (parseBBDate(a.dueDate)?.getTime() ?? 0) < now.getTime() && !handedIn.has(a.status),
         );
+        const unknown = [...upcoming, ...overdue].filter((a) => !a.status || a.status === 'unknown').length;
         return jsonResult({
           window: { from: now.toISOString(), until: until.toISOString(), days },
           count: upcoming.length,
           items: upcoming.map(row),
           recently_overdue: overdue.length > 0 ? overdue.map(row) : undefined,
-          undated_items_excluded: undated,
-          warnings: warnings.length > 0 ? warnings : undefined,
+          ...limitations([
+            ...warnings,
+            unknown > 0 ? UNKNOWN_STATUS_GAP(unknown) : undefined,
+            undated
+              ? `${undated} assignment${undated === 1 ? ' has' : 's have'} no due date in Blackboard, so ${undated === 1 ? 'it is' : 'they are'} not listed here. Ask for all assignments to see ${undated === 1 ? 'it' : 'them'}.`
+              : undefined,
+            'Only work posted in Blackboard is included. Deadlines a professor gives only in class, on a syllabus PDF, or in an outside tool (like McGraw Hill Connect or Gradescope) will not appear.',
+          ]),
         });
       } catch (err) {
         return errorResult(err);
@@ -219,8 +226,15 @@ export function registerStudentTools(server: McpServer, ctx: BBToolContext): voi
           return {
             since: sinceIso,
             course_count: courses.length,
-            courses_not_checked:
-              skipped > 0 ? `${skipped} older courses were not checked (only the ${MAX_COURSES_FOR_SWEEPS} newest are).` : undefined,
+            ...limitations([
+              skipped > 0
+                ? `${skipped} older courses were not checked (only the ${MAX_COURSES_FOR_SWEEPS} newest are). Ask about a specific course to check it.`
+                : undefined,
+              // A real gap in what Blackboard exposes: grade cells carry no
+              // "graded on" date, so only items the instructor edited recently
+              // can be checked.
+              'New grades are only spotted on gradebook items the instructor changed recently. A grade entered on an older item can be missed here; ask for the grades in a course to be sure.',
+            ]),
             announcements: perCourse.flatMap((b) => b.announcements),
             new_or_changed_content: perCourse.flatMap((b) => b.newContent),
             changed_assignments: perCourse.flatMap((b) => b.changedAssignments),
@@ -371,6 +385,19 @@ export function registerStudentTools(server: McpServer, ctx: BBToolContext): voi
               column: column?.name ?? null,
             },
             related_announcements: relatedAnnouncements,
+            ...limitations([
+              !column
+                ? 'This item is not linked to a gradebook column, so its grade, points and submission status are unknown here. Check it in Blackboard.'
+                : undefined,
+              column && (status ?? 'unknown') === 'unknown' ? UNKNOWN_STATUS_GAP(1) : undefined,
+              column && !cell ? 'Blackboard did not return the grade for this item, so it is unknown here (not zero).' : undefined,
+              rubric.length === 0 && column
+                ? 'No rubric came through from Blackboard. If the assignment page shows one, it has to be read there.'
+                : undefined,
+              item && !item.descriptionText
+                ? 'This item has no written instructions in Blackboard. They may be in an attached file (see attachments) or given in class.'
+                : undefined,
+            ]),
             hint:
               item && attachments.length > 0
                 ? 'Call get_attachment with course_id + content_id (+ file_id) to read an attachment.'

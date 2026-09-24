@@ -15,6 +15,21 @@ export interface ToolResult {
   [key: string]: unknown;
 }
 
+/**
+ * What an answer could not cover, as plain sentences meant for the student,
+ * each with what they can do instead. Every tool reports gaps under this one
+ * name so the AI always knows where to look, and the server's instructions
+ * tell it to pass each one on. Spread into a result; omitted when empty.
+ */
+export function limitations(list: Array<string | undefined | null | false>): { limitations?: string[] } {
+  const clean = [...new Set(list.filter((x): x is string => typeof x === 'string' && x.trim().length > 0))];
+  return clean.length > 0 ? { limitations: clean } : {};
+}
+
+export const UNKNOWN_STATUS_GAP = (n: number): string =>
+  `Blackboard did not say whether ${n === 1 ? '1 item was' : `${n} items were`} handed in (status "unknown"). ` +
+  'Check those in Blackboard rather than assuming they are missing.';
+
 export function jsonResult(data: unknown): ToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
 }

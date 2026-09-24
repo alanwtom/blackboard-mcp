@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { chromium } from 'playwright';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,56 @@ import path from 'node:path';
  */
 export const IS_WINDOWS = process.platform === 'win32';
 export const IS_MAC = process.platform === 'darwin';
+
+/**
+ * Browsers the tool can drive, in the order it prefers them. All three are
+ * Chrome underneath. Edge ships with every copy of Windows 10/11, so Windows
+ * students never need Chrome; "chromium" is the private copy setup can
+ * download for anyone (typically a Safari-only Mac) who has neither.
+ */
+export type BrowserId = 'chrome' | 'msedge' | 'chromium';
+export const BROWSER_PREFERENCE: BrowserId[] = ['chrome', 'msedge', 'chromium'];
+export const BROWSER_NAMES: Record<BrowserId, string> = {
+  chrome: 'Google Chrome',
+  msedge: 'Microsoft Edge',
+  chromium: 'Chromium (downloaded for blackboard-mcp)',
+};
+
+/** Standard Edge install locations, most likely first. */
+export function edgeInstallCandidates(): string[] {
+  if (IS_WINDOWS) {
+    const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(
+      (r): r is string => typeof r === 'string' && r.length > 0,
+    );
+    return roots.map((root) => path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
+  }
+  if (IS_MAC) return ['/Applications/Microsoft Edge.app'];
+  return ['/usr/bin/microsoft-edge', '/usr/bin/microsoft-edge-stable', '/opt/microsoft/msedge/msedge'];
+}
+
+/** Whether a given browser is available to launch right now. */
+export function isBrowserInstalled(id: BrowserId): boolean {
+  // Test switch: behave like a Safari-only Mac, so the automatic browser
+  // download can be exercised on a machine that has Chrome.
+  if (process.env.BB_PRETEND_NO_BROWSERS === '1' && id !== 'chromium') return false;
+  if (id === 'chrome') return isChromeInstalled();
+  if (id === 'msedge') return edgeInstallCandidates().some((p) => fs.existsSync(p));
+  try {
+    // Playwright writes this marker last; without it (a download cut off
+    // part-way) the browser may be half-unpacked and would never launch.
+    const exe = chromium.executablePath();
+    const dir = exe.split(path.sep).findIndex((part) => /^chromium-\d+$/.test(part));
+    const root = dir >= 0 ? exe.split(path.sep).slice(0, dir + 1).join(path.sep) : path.dirname(exe);
+    return fs.existsSync(exe) && fs.existsSync(path.join(root, 'INSTALLATION_COMPLETE'));
+  } catch {
+    return false;
+  }
+}
+
+/** Installed browsers, most preferred first. */
+export function installedBrowsers(): BrowserId[] {
+  return BROWSER_PREFERENCE.filter((id) => isBrowserInstalled(id));
+}
 
 /** Standard Chrome install locations, most likely first. */
 export function chromeInstallCandidates(): string[] {

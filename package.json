@@ -1,11 +1,11 @@
 {
   "name": "blackboard-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first, read-only Blackboard MCP server for the signed-in student (Syracuse University)",
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "blackboard-mcp": "dist/index.js"
@@ -13,16 +13,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "login": "npm run -s build && node dist/cli/login.js",
-    "status": "npm run -s build && node dist/cli/status.js",
-    "courses": "npm run -s build && node dist/cli/courses.js",
-    "discover": "npm run -s build && node dist/cli/discover.js",
-    "logout": "npm run -s build && node dist/cli/logout.js",
-    "connect": "npm run -s build && node dist/cli/connect.js",
+    "login": "node dist/cli/login.js",
+    "status": "node dist/cli/status.js",
+    "courses": "node dist/cli/courses.js",
+    "discover": "node dist/cli/discover.js",
+    "logout": "node dist/cli/logout.js",
+    "connect": "node dist/cli/connect.js",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "bundle": "npm run build && node scripts/bundle.mjs",
     "test:watch": "vitest",
-    "setup": "npm install --no-fund --no-audit && tsc -p tsconfig.json && node dist/cli/setup.js"
+    "setup": "npm install --omit=dev --no-fund --no-audit && node dist/cli/setup.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

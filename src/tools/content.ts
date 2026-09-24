@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { contentTruncation, getCourseContent } from '../blackboard/content.js';
-import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
 
 export function registerContentTools(server: McpServer, ctx: BBToolContext): void {
   server.registerTool(
@@ -28,7 +28,15 @@ export function registerContentTools(server: McpServer, ctx: BBToolContext): voi
           course_id: args.course_id,
           folder_id: args.folder_id ?? null,
           count: items.length,
-          incomplete: contentTruncation(items),
+          ...limitations([
+            contentTruncation(items),
+            (() => {
+              const tools = items.filter((i) => i.type === 'tool');
+              return tools.length > 0
+                ? `${tools.map((t) => `"${t.title}"`).join(', ')} ${tools.length === 1 ? 'opens' : 'open'} in an outside tool (like McGraw Hill Connect or Gradescope) that this cannot read. Open ${tools.length === 1 ? 'it' : 'them'} in Blackboard.`
+                : undefined;
+            })(),
+          ]),
           items: items.map((i) => ({
             content_id: i.id,
             title: i.title,

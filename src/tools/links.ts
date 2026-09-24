@@ -11,7 +11,12 @@ import { allowLinks, allowedUrl, isLinkAllowed, linkKey } from '../blackboard/li
 import { assertPublicUrl, type BBHttp } from '../blackboard/session.js';
 
 import type { Course } from '../blackboard/types.js';
-import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+
+/** A read that worked but left something out (e.g. a YouTube video without its transcript). */
+function isPartial(r: LinkReadResult): boolean {
+  return /no transcript|no captions/i.test(r.format ?? '');
+}
 
 /** Long reads are kept briefly so "keep reading" does not refetch the page. */
 const READ_CACHE_MS = 20 * 60_000;
@@ -85,7 +90,7 @@ export function registerLinkTools(server: McpServer, ctx: BBToolContext): void {
           const opened = await ctx.openSignIn(result.url, service).catch(() => undefined);
           if (opened === 'opened') {
             note =
-              `A Chrome window has opened on this link, with a red banner across the top. Tell the student to ` +
+              `A browser window has opened on this link, with a red banner across the top. Tell the student to ` +
               `${result.status === 'needs_passcode' ? 'type the passcode' : `sign in to ${service}`} there, close that tab, ` +
               'and then ask again. Nothing is typed for them.' +
               (service === 'Google'
@@ -104,7 +109,9 @@ export function registerLinkTools(server: McpServer, ctx: BBToolContext): void {
           format: result.format ?? null,
           final_url: result.finalUrl && result.finalUrl !== result.url ? result.finalUrl : undefined,
           saved_path: result.savedPath,
-          note,
+          // Anything short of a full read is a gap the student should hear about.
+          ...limitations([result.status === 'ok' && !isPartial(result) ? undefined : note]),
+          hint: result.status === 'ok' && !isPartial(result) ? note : undefined,
           text: page?.text ?? null,
           offset: page?.offset,
           total_chars: page?.total_chars,

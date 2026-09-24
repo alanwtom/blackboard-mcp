@@ -27,7 +27,7 @@ async function main(): Promise<number> {
     [
       'Blackboard traffic recorder',
       '--------------------------',
-      `A Chrome window will open at ${BASE_URL}.`,
+      `A browser window will open at ${BASE_URL}.`,
       'Browse Blackboard normally (courses, content, grades, calendar...).',
       'Every Blackboard API call will be recorded here.',
       'Press Ctrl+C when done.',

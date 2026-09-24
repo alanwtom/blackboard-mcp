@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getAssignments } from '../blackboard/assignments.js';
-import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS, UNKNOWN_STATUS_GAP, type BBToolContext } from './util.js';
 
 export function registerAssignmentTools(server: McpServer, ctx: BBToolContext): void {
   server.registerTool(
@@ -53,7 +53,13 @@ export function registerAssignmentTools(server: McpServer, ctx: BBToolContext): 
             description: a.descriptionText,
             url: a.url,
           })),
-          warnings: warnings.length > 0 ? warnings : undefined,
+          ...limitations([
+            ...warnings,
+            (() => {
+              const n = args.include_status ? assignments.filter((a) => !a.status || a.status === 'unknown').length : 0;
+              return n > 0 ? UNKNOWN_STATUS_GAP(n) : undefined;
+            })(),
+          ]),
           note: 'Use "ref" with get_assignment_context for the full package (instructions, attachments, grades, related announcements).',
         });
       } catch (err) {

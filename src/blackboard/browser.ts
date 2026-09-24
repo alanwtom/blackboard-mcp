@@ -1,14 +1,108 @@
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 import { chromium, type BrowserContext } from 'playwright';
 import { BlackboardError } from './errors.js';
-import { ensureDirs, paths } from '../storage/session-store.js';
+import { ensureDirs, paths, readMeta, writeMeta } from '../storage/session-store.js';
+import { BROWSER_NAMES, installedBrowsers, isBrowserInstalled, type BrowserId } from '../platform.js';
 
 /**
- * Chrome is required (the project standard). The dedicated profile directory
- * under ~/.blackboard-mcp/chrome-profile holds the authenticated session —
- * it is NOT the student's normal Chrome profile, so the student's personal
- * browsing, cookies, and saved passwords stay untouched.
+ * Which browser to drive: Chrome, else Edge, else the private Chromium setup
+ * can download. Its profile under ~/.blackboard-mcp holds the session — it
+ * is NOT the student's everyday browser profile, so their personal browsing,
+ * cookies, and saved passwords stay untouched.
+ *
+ * Once a machine has used one, it keeps using it (its sign-ins live in that
+ * browser's profile), unless it disappears. BB_BROWSER_CHANNEL forces one.
  */
-export const CHROME_CHANNEL = process.env.BB_BROWSER_CHANNEL ?? 'chrome';
+export async function chooseBrowser(): Promise<string> {
+  const forced = process.env.BB_BROWSER_CHANNEL?.trim();
+  if (forced) return forced;
+  const meta = await readMeta().catch(() => ({}) as { browser?: string });
+  if (meta.browser && isBrowserInstalled(meta.browser as BrowserId)) return meta.browser;
+  const first = installedBrowsers()[0];
+  if (!first) {
+    throw new BlackboardError(
+      'BROWSER_NOT_INSTALLED',
+      'No browser this tool can use was found (it needs Google Chrome, Microsoft Edge, or its own downloaded Chromium).',
+    );
+  }
+  await writeMeta({ browser: first }).catch(() => undefined);
+  return first;
+}
+
+let downloading: Promise<boolean> | null = null;
+let lastDownloadFailed = false;
+const DOWNLOAD_TIME_LIMIT_MS = 10 * 60_000;
+
+/**
+ * Whether this process can start the browser download at all. Inside Claude
+ * Desktop the tool runs in the app's own process (Electron), and "starting
+ * Node" there means starting the Claude app itself — a test did exactly
+ * that and opened extra copies of Claude. So there the student is asked to
+ * install Chrome instead; only a normal Node (terminal installs) downloads.
+ */
+export function canDownloadBrowser(): boolean {
+  return !process.versions.electron;
+}
+
+/** True once, after a download attempt failed, so the student hears about it. */
+export function takeDownloadFailure(): boolean {
+  const failed = lastDownloadFailed;
+  lastDownloadFailed = false;
+  return failed;
+}
+
+/**
+ * Fetch the tool's own Chromium in the background (no Chrome or Edge on this
+ * computer), so the student is only told to ask again in a minute or two.
+ * One download at a time, stopped after ten minutes; a failure is reported
+ * on the next question (see takeDownloadFailure) rather than hidden.
+ */
+export function downloadPrivateBrowser(): Promise<boolean> {
+  if (downloading) return downloading;
+  if (!canDownloadBrowser()) return Promise.resolve(false);
+  const attempt = new Promise<boolean>((resolve) => {
+    let cli: string;
+    try {
+      cli = path.join(path.dirname(createRequire(import.meta.url).resolve('playwright/package.json')), 'cli.js');
+    } catch {
+      resolve(false);
+      return;
+    }
+    // Output is discarded: in the MCP server stdout is the protocol channel.
+    // The environment is passed through so this works under the Node that
+    // ships inside Claude Desktop as well as a normal one.
+    const child = spawn(process.execPath, [cli, 'install', '--no-shell', 'chromium'], { stdio: 'ignore', env: process.env });
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, DOWNLOAD_TIME_LIMIT_MS);
+    timer.unref();
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve(code === 0 && isBrowserInstalled('chromium'));
+    });
+  });
+  downloading = attempt.then((ok) => {
+    downloading = null;
+    if (!ok) lastDownloadFailed = true;
+    return ok;
+  });
+  return downloading;
+}
+
+export function isDownloadingBrowser(): boolean {
+  return downloading !== null;
+}
+
+export function browserName(id: string): string {
+  return BROWSER_NAMES[id as BrowserId] ?? id;
+}
 
 function isProfileBusyError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -36,18 +130,18 @@ function launchFailureSummary(err: unknown): string {
 }
 
 /** Turn a raw Playwright launch failure into a coded, student-readable error. */
-export function classifyLaunchError(err: unknown): BlackboardError {
+export function classifyLaunchError(err: unknown, browser = 'chrome'): BlackboardError {
   if (isProfileBusyError(err)) {
     return new BlackboardError(
       'BROWSER_PROFILE_BUSY',
-      'Blackboard is already open in another app (Claude Desktop, a claude terminal session, or another npm run command). ' +
-        'It lets go after 5 idle minutes; or quit that app and try again.',
+      'Blackboard is already open in another app (for example Claude Desktop and Claude Code at the same time). ' +
+        'It lets go after 5 idle minutes; or quit the other app and try again.',
     );
   }
-  if (isChannelMissingError(err) && CHROME_CHANNEL === 'chrome') {
+  if (isChannelMissingError(err)) {
     return new BlackboardError(
       'BROWSER_LAUNCH_FAILED',
-      'Google Chrome was not found. Install it from https://www.google.com/chrome/, or set BB_BROWSER_CHANNEL=chromium and run: npx playwright install chromium',
+      `${browserName(browser)} could not be found any more. Ask again and another browser will be used (or downloaded).`,
     );
   }
   return new BlackboardError('BROWSER_LAUNCH_FAILED', `Failed to launch browser: ${launchFailureSummary(err)}`);
@@ -56,15 +150,17 @@ export function classifyLaunchError(err: unknown): BlackboardError {
 export async function launchBrowser(opts: { headless?: boolean } = {}): Promise<BrowserContext> {
   await ensureDirs();
   const headless = opts.headless ?? true;
+  const browser = await chooseBrowser();
   try {
-    return await chromium.launchPersistentContext(paths.profileDir, {
-      channel: CHROME_CHANNEL,
+    return await chromium.launchPersistentContext(paths.profileDirFor(browser), {
+      // "chromium" is the downloaded copy, run in the same full headless mode.
+      channel: browser,
       headless,
       acceptDownloads: true,
       viewport: { width: 1440, height: 900 },
       timeout: 60_000,
     });
   } catch (err) {
-    throw classifyLaunchError(err);
+    throw classifyLaunchError(err, browser);
   }
 }

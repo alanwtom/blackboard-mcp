@@ -1,0 +1,371 @@
+import { globalCache, TTL } from './cache.js';
+import { findCourse, noteCourseDenied, readableCourses } from './courses.js';
+import { getCourseContent } from './content.js';
+import { getPaged, getJson } from './transport.js';
+import { isBlackboardError } from './errors.js';
+import { asRecord, gradeCellScore, isoOrNow, mapWithConcurrency, numField, strField, titlesMatch, toIso, slugify, withinWindow, } from './util.js';
+const API = '/learn/api/public/v1';
+const API_V2 = '/learn/api/public/v2';
+/** Upper bound on per-assignment status lookups, to keep volume predictable. */
+const STATUS_RESOLUTION_CAP = 60;
+function normalizeColumn(raw, courseId) {
+    const rec = asRecord(raw) ?? {};
+    const id = strField(rec, 'id');
+    const name = strField(rec, 'name');
+    if (!id || !name)
+        return null;
+    // Live Ultra shape: due at grading.due, points at score.possible. Keep the
+    // documented alternates for other deployments.
+    const due = toIso(strField(rec, 'grading.due')) ??
+        toIso(rec.due) ??
+        toIso(rec.dueDate) ??
+        toIso(strField(rec, 'availability.duration.end'));
+    const points = numField(rec, 'score.possible') ?? numField(rec, 'score.maximum');
+    return {
+        id,
+        courseId,
+        contentId: strField(rec, 'contentId'),
+        name,
+        pointsPossible: points,
+        dueDate: due ?? undefined,
+        modified: toIso(rec.modified),
+        raw: rec,
+    };
+}
+/** Student-visible gradebook columns for a course (cached). */
+export async function getGradebookColumns(http, courseId) {
+    return globalCache.wrap(`columns:${courseId}`, TTL.gradebookColumns, async () => {
+        const raw = await getPaged(http, `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns?limit=100`);
+        return raw
+            .map((r) => normalizeColumn(r, courseId))
+            .filter((c) => c !== null);
+    });
+}
+/**
+ * Ultra calendar items (due dates across courses). Tolerates missing/renamed
+ * fields: courseId may arrive as courseId or calendarId, dates as start or
+ * startDate.
+ */
+export async function getCalendarItems(http, opts = {}) {
+    // Rounded to the hour so back-to-back calls share one cached result; the
+    // raw clock made every call a cache miss.
+    const now = Math.floor(Date.now() / 3600_000) * 3600_000;
+    const since = opts.sinceMs ?? now - 30 * 24 * 3600_000;
+    const until = opts.untilMs ?? now + 120 * 24 * 3600_000;
+    const cacheKey = `calendar:${since}:${until}`;
+    return globalCache.wrap(cacheKey, TTL.calendar, async () => {
+        const data = await getJson(http, `${API}/calendars/items?since=${since}&until=${until}`, { allowNotFound: true });
+        if (!data)
+            return [];
+        const results = Array.isArray(data)
+            ? data
+            : Array.isArray(data?.results)
+                ? data.results
+                : [];
+        return results
+            .map((r) => {
+            const rec = asRecord(r) ?? {};
+            const id = strField(rec, 'id');
+            if (!id)
+                return null;
+            const courseId = strField(rec, 'courseId') ?? strField(rec, 'calendarId');
+            return {
+                id,
+                courseId: courseId && /^_\d+_1$/.test(courseId) ? courseId : undefined,
+                title: strField(rec, 'title'),
+                type: strField(rec, 'type'),
+                startDate: toIso(rec.start) ?? toIso(rec.startDate),
+                endDate: toIso(rec.end) ?? toIso(rec.endDate),
+            };
+        })
+            .filter((c) => c !== null);
+    });
+}
+export function mergeAssignmentParts(parts) {
+    let best;
+    for (const part of parts) {
+        if (!best) {
+            best = part;
+            continue;
+        }
+        // Prefer parts that carry a real Blackboard content id.
+        const bestRank = best.id && best.id.startsWith('_') ? 2 : best.category === 'gradebook-column' ? 1 : 0;
+        const partRank = part.id && part.id.startsWith('_') ? 2 : part.category === 'gradebook-column' ? 1 : 0;
+        if (partRank > bestRank)
+            best = part;
+    }
+    if (!best?.title || !best.courseId)
+        return undefined;
+    const merged = {
+        id: best.id ?? slugify(best.title),
+        ref: best.id && best.id.startsWith('_') ? `${best.courseId}:${best.id}` : `${best.courseId}:${slugify(best.title)}`,
+        courseId: best.courseId,
+        title: best.title,
+        category: best.category ?? 'assignment',
+    };
+    const pickStr = (...vals) => vals.find((v) => v !== undefined);
+    const pickNum = (...vals) => vals.find((v) => v !== undefined);
+    merged.courseName = pickStr(...parts.map((p) => p.courseName));
+    merged.descriptionText = pickStr(...parts.map((p) => p.descriptionText));
+    merged.dueDate = pickStr(...parts.map((p) => p.dueDate));
+    merged.pointsPossible = pickNum(...parts.map((p) => p.pointsPossible));
+    merged.status = pickStr(...parts.map((p) => p.status));
+    merged.url = pickStr(...parts.map((p) => p.url));
+    merged.columnId = pickStr(...parts.map((p) => p.columnId));
+    return merged;
+}
+/**
+ * Grade-cell values that mean "the student handed something in".
+ *
+ * Compared case- and separator-insensitively, because deployments differ on
+ * NeedsGrading vs NEEDS_GRADING. "Graded" is listed for completeness; a graded
+ * item is caught earlier by its score.
+ */
+const SUBMITTED_GRADE_STATUSES = new Set(['needsgrading', 'needsgradingagain', 'completed', 'graded']);
+/**
+ * Attempt states that mean "started, not handed in". Blackboard uses
+ * InProgress for a saved draft; counting that as submitted told a student
+ * with an unsent draft that they were done.
+ */
+const UNSUBMITTED_ATTEMPT_STATUSES = new Set(['inprogress', 'notattempted', 'abandoned', 'suspended', 'canceled', 'cancelled']);
+const statusKey = (s) => (s ?? '').replace(/[\s_-]/g, '').toLowerCase();
+/**
+ * Read a submission out of the grade cell itself.
+ *
+ * The grade object does NOT contain an attempts array — attempts are their own
+ * endpoint — so it signals a submission via `firstRelevantAttemptId` or
+ * `status`. The old code only looked for `data.attempts`, which is never there,
+ * so every ungraded item read as "never submitted". The attempts check is kept
+ * for any deployment that does inline it.
+ */
+function submittedPerGradeCell(data) {
+    return SUBMITTED_GRADE_STATUSES.has(statusKey(strField(data, 'status')));
+}
+/**
+ * Ask the attempts endpoint directly. Returns undefined when Blackboard won't
+ * say (missing endpoint, no permission) — the caller must not read that as
+ * "not submitted".
+ */
+async function attemptStateForColumn(http, courseId, columnId) {
+    const data = await getJson(http, `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns/${encodeURIComponent(columnId)}/attempts?limit=5`, { allowNotFound: true }).catch(() => null);
+    if (!data)
+        return undefined;
+    const results = Array.isArray(data)
+        ? data
+        : Array.isArray(asRecord(data)?.results)
+            ? asRecord(data)?.results
+            : undefined;
+    if (!results)
+        return undefined;
+    if (results.length === 0)
+        return 'none';
+    const states = results.map((r) => statusKey(strField(r, 'status')));
+    if (states.some((s) => s === '' || !UNSUBMITTED_ATTEMPT_STATUSES.has(s)))
+        return 'submitted';
+    return 'in_progress';
+}
+/**
+ * The student's submission status for one gradebook column (1-2 requests).
+ *
+ * Only claims 'not_submitted' on positive evidence that no attempt exists.
+ * Anything inconclusive is 'unknown', because wrongly telling a student they
+ * missed a deadline is far worse than admitting we can't tell.
+ */
+async function statusForColumn(http, courseId, columnId) {
+    const data = await getJson(http, `${API_V2}/courses/${encodeURIComponent(courseId)}/gradebook/columns/${encodeURIComponent(columnId)}/users/me`, { allowNotFound: true });
+    if (!data)
+        return 'unknown';
+    if (gradeCellScore(data) !== undefined || strField(data, 'displayGrade.text'))
+        return 'graded';
+    if (data.exempt === true)
+        return 'graded';
+    if (submittedPerGradeCell(data))
+        return 'submitted';
+    const attempted = await attemptStateForColumn(http, courseId, columnId);
+    if (attempted === 'submitted')
+        return 'submitted';
+    if (attempted === 'in_progress')
+        return 'in_progress';
+    if (attempted === 'none')
+        return 'not_submitted';
+    // The attempts list was unavailable. The grade cell pointing at an attempt
+    // is still evidence something was handed in.
+    const inline = data.attempts;
+    if (strField(data, 'firstRelevantAttemptId') || (Array.isArray(inline) && inline.length > 0))
+        return 'submitted';
+    return 'unknown';
+}
+/**
+ * Assignments and assessments, combining three Blackboard sources:
+ * course content items (assignment/test handlers), gradebook columns (points,
+ * due dates), and the Ultra calendar (authoritative due dates). Results are
+ * deduplicated into one consistent list.
+ */
+export async function getAssignments(http, opts = {}) {
+    const courses = opts.courseId
+        ? [await findCourse(http, opts.courseId)]
+        : await readableCourses(http);
+    const calendar = await getCalendarItems(http).catch(() => []);
+    // Courses are independent, so collecting them in series made the wait scale
+    // with the number of enrolments — and most of those are past terms that
+    // answer 403 straight away. Same request count, no longer queued behind
+    // each other. Columns are kept so status resolution need not refetch them.
+    const columnsByCourse = new Map();
+    const collected = await mapWithConcurrency(courses, async (course) => {
+        const parts = [];
+        const base = { courseId: course.id, courseName: course.name, url: course.url };
+        // Content and gradebook are independent requests; overlap them too.
+        // A course counts as locked only when both refuse: some courses publish a
+        // gradebook while hiding contents, and dropping those would lose grades.
+        let refusals = 0;
+        const denied = (err) => {
+            if (isBlackboardError(err) && err.code === 'PERMISSION_DENIED')
+                refusals += 1;
+        };
+        let failure;
+        const failed = (err) => {
+            denied(err);
+            if (!(isBlackboardError(err) && err.code === 'PERMISSION_DENIED')) {
+                failure = err instanceof Error ? err.message : String(err);
+            }
+        };
+        const [items, columns] = await Promise.all([
+            getCourseContent(http, course.id, { depth: 2, includeAttachments: false }).catch((err) => {
+                failed(err);
+                return [];
+            }),
+            getGradebookColumns(http, course.id).catch((err) => {
+                failed(err);
+                return [];
+            }),
+        ]);
+        if (refusals === 2)
+            noteCourseDenied(course.id);
+        // A real failure (not "this old course is locked") must be said out loud,
+        // or the answer reads as "nothing due in this course".
+        if (failure)
+            opts.onWarning?.(`Could not fully load ${course.name}, so its work may be missing: ${failure}`);
+        // 1) Content items that are assignments or tests.
+        for (const item of items) {
+            if (item.type !== 'assignment' && item.type !== 'test')
+                continue;
+            parts.push({
+                id: item.id,
+                title: item.title,
+                descriptionText: item.descriptionText,
+                category: item.type === 'test' ? 'test' : 'assignment',
+                columnId: item.gradeColumnId,
+                ...base,
+            });
+        }
+        // 2) Gradebook columns tied to content or carrying due dates.
+        for (const col of columns) {
+            if (!col.contentId && !col.dueDate)
+                continue;
+            parts.push({
+                id: col.contentId,
+                title: col.name,
+                dueDate: col.dueDate,
+                pointsPossible: col.pointsPossible,
+                category: 'gradebook-column',
+                columnId: col.id,
+                ...base,
+            });
+        }
+        // 3) Calendar due-date items for this course.
+        for (const cal of calendar) {
+            if (cal.courseId !== course.id || !cal.startDate)
+                continue;
+            const matchesColumn = columns.some((c) => titlesMatch(c.name, cal.title));
+            const matchesContent = items.some((i) => titlesMatch(i.title, cal.title));
+            if (!matchesColumn && !matchesContent)
+                continue;
+            parts.push({
+                title: cal.title ?? 'Due item',
+                dueDate: cal.startDate,
+                category: 'calendar-item',
+                ...base,
+            });
+        }
+        columnsByCourse.set(course.id, columns);
+        return [course.id, parts];
+    });
+    const partsByCourse = new Map(collected);
+    // Deduplicate across sources. Parts with a real content id group by id;
+    // id-less parts (calendar items) attach to a matching-title bucket, or form
+    // their own bucket when nothing matches.
+    const buckets = new Map();
+    const orphans = [];
+    for (const [, parts] of partsByCourse) {
+        for (const part of parts) {
+            if (!part.courseId || !part.title)
+                continue;
+            if (part.id && part.id.startsWith('_')) {
+                const key = `${part.courseId}|${part.id}`;
+                const bucket = buckets.get(key) ?? [];
+                bucket.push(part);
+                buckets.set(key, bucket);
+            }
+            else {
+                orphans.push(part);
+            }
+        }
+    }
+    for (const orphan of orphans) {
+        let home;
+        for (const bucket of buckets.values()) {
+            if (bucket[0]?.courseId !== orphan.courseId)
+                continue;
+            if (bucket.some((p) => titlesMatch(p.title, orphan.title))) {
+                home = bucket;
+                break;
+            }
+        }
+        if (!home) {
+            const key = `${orphan.courseId}|${slugify(orphan.title ?? 'untitled')}|${orphan.pointsPossible ?? ''}`;
+            home = buckets.get(key);
+            if (!home) {
+                home = [];
+                buckets.set(key, home);
+            }
+        }
+        home.push(orphan);
+    }
+    let merged = [...buckets.values()]
+        .map((bucket) => mergeAssignmentParts(bucket))
+        .filter((a) => a !== undefined);
+    if (opts.dueAfter || opts.dueBefore) {
+        merged = merged.filter((a) => withinWindow(a.dueDate, { after: opts.dueAfter, before: opts.dueBefore }));
+    }
+    merged.sort((a, b) => {
+        const da = a.dueDate ? isoOrNow(a.dueDate).getTime() : Number.MAX_SAFE_INTEGER;
+        const db = b.dueDate ? isoOrNow(b.dueDate).getTime() : Number.MAX_SAFE_INTEGER;
+        return da - db;
+    });
+    // Optional status resolution, after filtering and sorting: the cap should
+    // spend its requests on the soonest-due items in the answer, not on
+    // whatever came first in course order and was then filtered away.
+    if (opts.includeStatus) {
+        const pending = merged
+            .map((assignment) => ({ assignment, column: columnFor(columnsByCourse.get(assignment.courseId) ?? [], assignment) }))
+            .filter((entry) => entry.column !== undefined);
+        if (pending.length > STATUS_RESOLUTION_CAP) {
+            opts.onWarning?.(`Submission status was checked for the first ${STATUS_RESOLUTION_CAP} items only; the rest show no status.`);
+        }
+        await mapWithConcurrency(pending.slice(0, STATUS_RESOLUTION_CAP), async ({ assignment, column }) => {
+            assignment.status = await statusForColumn(http, assignment.courseId, column.id).catch(() => 'unknown');
+        });
+    }
+    return merged;
+}
+/**
+ * The gradebook column for an assignment: the exact link Blackboard states
+ * first, then the content id, and a title match only as a last resort — two
+ * weekly items both called "Reflection" must not share one status.
+ */
+export function columnFor(columns, a) {
+    return ((a.columnId ? columns.find((c) => c.id === a.columnId) : undefined) ??
+        (a.id ? columns.find((c) => c.contentId === a.id) : undefined) ??
+        columns.find((c) => titlesMatch(c.name, a.title)));
+}
+export { statusForColumn };

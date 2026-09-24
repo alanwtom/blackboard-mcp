@@ -21,7 +21,9 @@ describe('getJson', () => {
     const err = await getJson(http, '/x').catch((e) => e);
     expect(err).toBeInstanceOf(BlackboardError);
     expect((err as BlackboardError).code).toBe('BLACKBOARD_SESSION_EXPIRED');
-    expect((err as BlackboardError).message).toContain('npm run login');
+    expect((err as BlackboardError).message).toContain('sign-in has expired');
+    // Students install a one-click extension and never have a terminal.
+    expect((err as BlackboardError).message).not.toMatch(/npm|terminal/i);
   });
 
   it('maps an HTML login page to BLACKBOARD_SESSION_EXPIRED even with HTTP 200', async () => {

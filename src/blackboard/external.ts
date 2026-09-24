@@ -74,9 +74,8 @@ function needsSignIn(url: string, kind: LinkKind, service: { service: string; co
     finalUrl,
     signIn: service,
     note:
-      `This link needs you to be signed in to ${service.service}. Quit your AI app, then run ` +
-      `"npm run connect -- ${service.connect}" in the blackboard-mcp folder and sign in in the window that opens. ` +
-      'You only need to do this once.',
+      `This link needs the student to be signed in to ${service.service}. Ask again in a moment and a sign-in window ` +
+      'will open for them. They only need to do this once.',
   };
 }
 
@@ -150,7 +149,7 @@ async function fetchFileOrSignIn(
       kind: ctx.kind,
       status: 'no_access',
       finalUrl: resp.finalUrl,
-      note: 'The site says you do not have access. If this is a Google or Microsoft file, make sure you are signed in with your SU account (npm run connect), or ask the professor to share it.',
+      note: 'The site says the student does not have access. If it is a Google or Microsoft file, they may need to sign in with their SU account, or ask the professor to share it.',
     };
   }
   if (resp.status === 404) {
@@ -453,9 +452,8 @@ async function readZoomRecording(ctx: Ctx): Promise<LinkReadResult> {
       finalUrl: page.finalUrl,
       signIn: { service: 'Zoom (passcode)', connect: ctx.url },
       note:
-        'This Zoom recording is protected by a passcode (usually posted next to the link). Quit your AI app, run ' +
-        `"npm run connect -- ${ctx.url}" in the blackboard-mcp folder, type the passcode in the window that opens, and ` +
-        'close it. Zoom remembers it after that.',
+        'This Zoom recording is protected by a passcode (usually posted next to the link). Ask again in a moment and a ' +
+        'window will open on the recording for the student to type the passcode. Zoom remembers it after that.',
     };
   }
   // The player's info API names the transcript and caption files.

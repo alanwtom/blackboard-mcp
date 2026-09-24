@@ -1,174 +1,147 @@
-# Blackboard MCP
+# Blackboard for Claude
 
-Ask an AI assistant about your own Blackboard and get real answers: what's due, what your
-grades are, what your professors posted, and the files for any assignment. It can also read
-what professors link to: Google Docs, Sheets and Slides, Drive folders, Colab notebooks, SU
-video recordings, Zoom recordings, PDFs and web pages. It works with your own logged-in
-Blackboard session, so it can only see what you can already see. It is read-only: it can
-never submit, post, message, or change anything.
+Ask Claude about your own Blackboard and get real answers: what's due, your grades, what your
+professors posted, and what's inside the files and links they share (PDFs, slides, Google
+Docs and Sheets, Colab notebooks, SU videos, and more).
 
-Setup takes about ten minutes and you only do it once. If you have never used a terminal,
-just copy and paste each command exactly as written.
+It only sees what you can already see, and it can never submit, post, or change anything.
 
 ![Asking about course readings and getting a summary pulled straight from Blackboard](docs/example-conversation.png)
 
-## What you need
+## Install (about 5 minutes, one time)
 
-1. A Mac, or a Windows 10 / 11 PC
-2. [Google Chrome](https://www.google.com/chrome/)
-3. [Node.js](https://nodejs.org) version 20 or newer (get the LTS installer)
-4. An AI app that supports MCP, such as [Claude Desktop](https://claude.ai/download) which is free for all Syracuse Students!
+Works on a Mac or a Windows PC.
 
-**Opening a terminal.** On a Mac, press Cmd + Space, type "Terminal", press Enter. On Windows,
-press the Windows key, type "PowerShell", press Enter.
+1. **Get Claude Desktop.** Download it from [claude.ai/download](https://claude.ai/download),
+   install it, open it, and sign in. (It's free for Syracuse students.)
+2. **Download this file:**
+   [**blackboard-mcp.mcpb**](https://github.com/alanwtom/blackboard-mcp/releases/latest/download/blackboard-mcp.mcpb)
+3. **Double-click the file you just downloaded.** Claude opens an install screen.
+   Click **Install**.
 
-Not sure if you have Node.js? Type `node -v` and press Enter. If you see `v20` or higher you
-are set.
+That's it. The tool also needs Google Chrome or Microsoft Edge on your computer. Windows
+already has Edge, and most Macs already have Chrome. If yours doesn't, Claude will tell you
+and link you to the free Chrome download.
 
-## Setup (do once)
+> Double-click didn't open Claude? In Claude, open **Settings**, click **Extensions**, and drag
+> the downloaded file into that window.
 
-Run these commands, one at a time.
+## The first time you use it
 
-**macOS**
+1. In Claude, ask: **"What do I have due this week?"**
+2. A browser window with a **red banner** across the top opens. Sign in there with your NetID
+   and approve Duo, like you always do.
+3. Ask your question again.
+
+You're done. You only sign in again when Blackboard logs you out, and when that happens the
+same red-banner window pops up by itself.
+
+Your password and Duo codes go only into that browser window. Claude never sees them, and
+this tool never saves them.
+
+## Things you can ask
+
+- "What's due in the next 7 days?"
+- "Anything new in my classes this week?"
+- "What are my grades in Oceanography?"
+- "Pull up the HW 3 assignment: instructions and attached files."
+- "Summarize the Week 3 lecture slides."
+- "What's in the Google Sheet my professor linked in the last announcement?"
+- "Read the Colab notebook for Lab 0 and explain the first exercise."
+
+Some links need you to be signed in to that site (for example a private Google file or a Zoom
+recording). When that happens, a red-banner window opens on the link. Sign in there, close
+that tab, and ask again.
+
+## What it can't see
+
+If an answer is missing something, Claude will tell you in that answer, and tell you what to do
+instead. The known gaps:
+
+- **Discussion boards, course messages, quiz and test questions, journals, groups,
+  attendance.** Not read at all. Open Blackboard for these.
+- **Outside tools launched from Blackboard** (McGraw Hill Connect, Gradescope, and similar).
+  Their work and deadlines live in that tool, not in Blackboard.
+- **Deadlines that exist only in class or in a syllabus file.** "What's due" only knows what
+  is posted in Blackboard. Ask it to read the syllabus file if you want those too.
+- **YouTube transcripts.** YouTube refuses to give transcripts to automated tools, so you get
+  the video's title, channel, length and description. To get the transcript yourself: open the
+  video, click "...more" under it, click "Show transcript", and paste it into the chat.
+- **Live Zoom meetings.** A class or office-hours link is recognised but never opened.
+- **Some grades.** Only grades your instructor has released are visible. "What's new" can miss
+  a grade entered on an older assignment; ask for a course's grades to be sure.
+- **Google sign-in may be refused.** Google sometimes blocks sign-in from automated browser
+  windows. If that happens, ask the professor to share the file as "anyone with the link".
+- **Links from outside your courses.** It only opens links a professor posted in one of your
+  courses (see Safety below).
+
+## If something goes wrong
+
+| What you see | What to do |
+| --- | --- |
+| Claude doesn't seem to know about Blackboard | Quit Claude completely and open it again (Mac: Cmd + Q. Windows: right-click the Claude icon near the clock and choose Quit). Then check **Settings → Extensions** shows Blackboard turned on. |
+| "Sign in in the window with the red banner" | Find that window (it may be behind Claude), sign in with your NetID and Duo, and ask again. |
+| "This computer has neither Google Chrome nor Microsoft Edge" | Install [Google Chrome](https://www.google.com/chrome/) (free), then ask again. |
+| "Blackboard is already open in another app" | Another app (like Claude Code) is using Blackboard. Wait a few minutes, or quit that app. |
+| A course looks empty | Courses from past terms are locked by the university. New courses may have nothing posted yet. |
+| Something else | Ask again. Blackboard has short hiccups sometimes. |
+
+## Update, remove, and privacy
+
+- **Update:** download the file again and double-click it.
+- **Remove:** in Claude, open **Settings → Extensions**, find Blackboard, and remove it.
+- **Erase your login:** delete the `.blackboard-mcp` folder in your home folder. It holds your
+  sign-in and any course files it downloaded, and nothing else. Never share that folder.
+- **Everything stays on your computer.** Nothing is sent anywhere except to Blackboard and the
+  sites your professors link to.
+- **Only your courses' links.** It only opens links a professor posted in one of your courses.
+  A web page can hide instructions aimed at the AI; this rule means such a page can never send
+  the AI, or your data, somewhere else. Links to your own computer or home network are refused.
+
+## Being a good citizen
+
+Use it for yourself, at a human pace, and check the university's acceptable-use policy before
+using any automation with your student account. Not affiliated with or endorsed by Syracuse
+University or Anthology/Blackboard.
+
+## Using Claude Code, or setting it up by hand
+
+<details>
+<summary><strong>Click to expand: the terminal setup</strong></summary>
+
+You need [Node.js](https://nodejs.org) 22 or newer and git. Then:
+
+**Mac**
 
 ```bash
-mkdir -p ~/Documents/GitHub
-cd ~/Documents/GitHub
-git clone https://github.com/alanwtom/blackboard-mcp.git
-cd blackboard-mcp
+git clone https://github.com/alanwtom/blackboard-mcp.git ~/blackboard-mcp
+cd ~/blackboard-mcp
 npm run setup
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-mkdir ~\Documents\GitHub -Force
-cd ~\Documents\GitHub
-git clone https://github.com/alanwtom/blackboard-mcp.git
-cd blackboard-mcp
+git clone https://github.com/alanwtom/blackboard-mcp.git ~\blackboard-mcp
+cd ~\blackboard-mcp
 npm run setup
 ```
 
-The first line creates the folder if you do not already have one. Do not skip it: if that
-folder is missing, the `cd` fails, and the next command quietly downloads the project into
-your home folder instead — everything still works, but none of the paths further down this
-page will match what you have.
+`npm run setup` checks for a browser (and offers to download one), connects Claude Desktop and
+Claude Code, and opens the sign-in window. To update later: `git pull`, then `npm run setup`.
 
-(`npm run setup` shows scrolling text for a minute or two while it downloads what it needs;
-that is normal. If your Mac says `git` is not installed, agree to install it, then run the
-commands again. On Windows, install [Git for Windows](https://git-scm.com/download/win)
-first if `git` is not recognized, then open a new PowerShell window.)
+If you already installed the one-click extension, don't also connect Claude Desktop here, or
+Blackboard will show up twice.
 
-`npm run setup` is a friendly wizard that:
+Other commands: `npm run login` (sign in again), `npm run status`, `npm run courses`,
+`npm run connect -- google` (sign in to a site for links), and `npm run logout`.
 
-1. Checks you have everything (Node.js, Chrome, the project build)
-2. Connects Claude Desktop (and Claude Code) for you, with your permission
-3. Checks your Blackboard session and opens a Chrome window to log in if needed
-4. Confirms everything works
+Doing every step by hand instead:
 
-For the login step, use the Chrome window with the red banner (not your usual Chrome
-browser). Sign in with your NetID and approve Duo exactly like usual. Your password and Duo
-codes are never seen or saved by this project: that part is always you typing in a real
-browser.
-
-When the wizard says everything is ready, quit and reopen your AI app, and you are done.
-Prefer doing these steps by hand? The manual way is described at the bottom of this page.
-
-## Use it
-
-Talk to your AI like a person:
-
-- "What's due in the next 7 days?"
-- "Any new announcements this week?"
-- "What are my grades in Calculus?"
-- "Pull up the Essay assignment: instructions and attached files."
-- "Summarize the lecture slides from Week 3."
-- "What's in the Google Sheet the professor linked in the last announcement?"
-- "Read the Colab notebook for Lab 0 and explain the first exercise."
-
-The first question takes a few seconds, because it has to start a browser and re-check your
-session; after that it is quicker still. Files are read for you (PDFs, Word, PowerPoint with
-speaker notes, Excel, notebooks), and a copy is saved in `~/.blackboard-mcp/downloads` on a
-Mac, or `C:\Users\yourname\.blackboard-mcp\downloads` on Windows.
-
-### Links professors post
-
-Most links just work, with no extra setup: Google Docs, Sheets (every tab), Slides, Drive
-files and folders, Colab notebooks, SU videos on video.syr.edu (with the transcript), GitHub,
-PDFs, articles, and Google or Microsoft Forms (it reads the questions; it never fills them in).
-
-Some links need you to be signed in to that site first, for example a Google file shared only
-with certain people, or a Zoom recording. When that happens, a Chrome window pops up on the
-link itself, with a red banner across the top. Sign in there (or type the Zoom passcode),
-close that tab, and ask again. You only do this once per site.
-
-If the window cannot open (for example because another question is still running), you can
-also do it by hand: quit your AI app and run this once, from the blackboard-mcp folder:
+1. **Install what it needs** (the project comes ready-built, so there is nothing to compile)
 
 ```bash
-npm run connect -- zoom
-```
-
-Use `google`, `zoom`, `microsoft`, `github`, `box` or `dropbox`, or paste the link itself.
-
-Things it cannot do, on purpose or because the site will not allow it:
-
-- **YouTube transcripts.** YouTube refuses to give transcripts to automated tools, so you get
-  the video's title, channel, length and description only.
-- **Live Zoom meetings.** A class or office-hours meeting link is recognised but never opened.
-- **Google sign-in may be refused.** Google sometimes blocks sign-in from automated browser
-  windows. If that happens, ask the professor to share the file as "anyone with the link".
-- **Only links from your own courses.** It will not open a link unless a professor posted it
-  in one of your courses (see Safety below).
-
-## If something goes wrong
-
-| What you see | What to do |
-| --- | --- |
-| "Blackboard session expired" | Run `npm run login` and sign in again. This is normal after a while. |
-| "Blackboard is already open in another app" | Claude Desktop and Claude Code share one Blackboard window. Wait a few minutes, or quit the one you are not using. |
-| A link "needs sign-in" | Sign in in the Chrome window with the red banner that pops up, close that tab, and ask again. If no window appears, quit your AI app and run `npm run connect -- <service>`. |
-| A question fails | Run `npm run status`, then try again. Blackboard has brief hiccups sometimes. |
-| "browser profile is already in use" | Something else already has the session open. Close the other terminal, and quit your AI app, before running `npm run login`. |
-| Login window confusion | Type your NetID in the window with the red banner. It is a separate private browser, not your usual Chrome. |
-| AI shows no Blackboard tools | Quit the AI app completely and reopen it. On Windows, closing the window is not enough: right-click the icon in the system tray and choose Quit. Then re-check the path in the manual steps. |
-| A course looks empty | Archived courses are locked by the university. New courses may have nothing posted yet. |
-| macOS: still no tools after restarting | Claude Desktop is launched by Finder, which does not always know where `node` lives — most often when Node came from `nvm` or Homebrew rather than the installer from nodejs.org. Run `which node`, then put that full path in place of `"node"` in the config block in the manual steps below. |
-| Windows: `npm` is not recognized | Close PowerShell, open it again, and retry. The Node.js installer only reaches new windows. |
-| Windows: "running scripts is disabled" | Windows is blocking npm's launcher. Open PowerShell as Administrator once and run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
-
-## Safety and privacy
-
-- Read-only by design: this project contains no code that could submit work, post messages,
-  or change anything. Forms linked by professors are read, never filled in or submitted.
-- It only opens links that a professor actually posted in one of your courses (plus the files
-  inside a shared folder, and pages on the same site). A web page can contain hidden text
-  aimed at the AI; this rule means such text can never send the AI, or your data, somewhere
-  new. Links to your own computer or home network are always refused.
-- It only sees what you can see, because it uses your own session.
-- Your password and Duo codes are never requested, read, or stored.
-- Everything stays on your own computer. To erase it all, run `npm run logout`, or delete the
-  `.blackboard-mcp` folder in your home folder (`~/.blackboard-mcp` on a Mac,
-  `C:\Users\yourname\.blackboard-mcp` on Windows). Never share that folder; it keeps you
-  signed in. Logout keeps your downloaded course files; delete the `downloads` folder inside
-  it to remove those too.
-
-## Being a good citizen
-
-Use it for yourself at a human pace, and check your university's acceptable-use policy
-before using any automation with your student account. Not affiliated with or endorsed by
-Syracuse University or Anthology/Blackboard.
-
-## Manual setup (if you prefer doing it by hand)
-
-<details>
-<summary><strong>Click to expand: the manual steps</strong></summary>
-
-1. **Build the project**
-
-```bash
-npm install
-npm run build
+npm install --omit=dev
 ```
 
 2. **Log in to Blackboard**
@@ -177,7 +150,7 @@ npm run build
 npm run login
 ```
 
-A Chrome window opens with a red banner. Sign in with your NetID and approve Duo there. When
+A browser window opens with a red banner. Sign in with your NetID and approve Duo there. When
 you land back on Blackboard, the window closes by itself.
 
 3. **Check that it worked**
@@ -197,7 +170,7 @@ On macOS the config lives at `~/Library/Application Support/Claude/claude_deskto
 "mcpServers": {
   "blackboard": {
     "command": "node",
-    "args": ["/Users/yourname/Documents/GitHub/blackboard-mcp/dist/index.js"]
+    "args": ["/Users/yourname/blackboard-mcp/dist/index.js"]
   }
 }
 ```
@@ -208,7 +181,7 @@ On Windows it lives at `%APPDATA%\Claude\claude_desktop_config.json`:
 "mcpServers": {
   "blackboard": {
     "command": "C:\\Program Files\\nodejs\\node.exe",
-    "args": ["C:\\Users\\yourname\\Documents\\GitHub\\blackboard-mcp\\dist\\index.js"]
+    "args": ["C:\\Users\\yourname\\blackboard-mcp\\dist\\index.js"]
   }
 }
 ```
@@ -254,7 +227,8 @@ claude mcp add --scope user blackboard -- "$((Get-Command node).Source)" "$PWD\d
 <details>
 <summary><strong>Architecture, configuration, and development notes</strong></summary>
 
-- **Stack**: TypeScript (ESM), Node 20+, Playwright (Chrome channel, dedicated profile),
+- **Stack**: TypeScript (ESM), Node 22+, Playwright driving Chrome, else Edge, else a downloaded Chromium (remembered per machine,
+  one dedicated profile folder per browser),
   MCP TypeScript SDK over stdio, Zod, Vitest.
 - **Data access**: Blackboard Learn REST API, called as same-origin requests from a page on
   the Blackboard host, so requests match what the Ultra web app itself sends. Both
@@ -295,6 +269,19 @@ claude mcp add --scope user blackboard -- "$((Get-Command node).Source)" "$PWD\d
 - **Configuration**: `BB_BROWSER_CHANNEL`, `BB_HEADLESS=0`, `BLACKBOARD_MCP_HOME`,
   `BB_BASE_URL`, `BB_SSO_ENTRY_URL`, and `BLACKBOARD_HOSTS` in `src/blackboard/hosts.ts`
   for other institutions.
+- **One-click extension**: `npm run bundle` builds `release/blackboard-mcp.mcpb` (about 7 MB):
+  the built code, runtime packages only, and `extension/manifest.json`. Claude Desktop runs it
+  with its own built-in Node (24 as of Sep 2026; the manifest requires 22+). Attach it to a
+  GitHub release under exactly that file name so the "latest" download link keeps working.
+  With no sign-in, the server itself opens the NetID window. With no Chrome or Edge, a
+  terminal install downloads Playwright's Chromium in the background; inside Claude Desktop
+  (which runs extensions in its own Electron process, where spawning "node" would start the
+  Claude app itself) the student is asked to install Chrome instead.
+  `BB_PRETEND_NO_BROWSERS=1` simulates a machine with neither.
+- **Shipped build**: `dist/` is committed so terminal installs get only runtime packages (about
+  44 MB) and never compile anything. After changing `src/`, run `npm run build` and commit
+  `dist/` too; a test fails if it is out of date. `npm run setup` removes dev tools from
+  `node_modules`, so run `npm install` again before developing.
 - **Development**: `npm run typecheck`, `npm test` (fully mocked), `npm run build`,
   `npm start`, and `npm run discover` (records real Blackboard traffic while you browse, to
   verify endpoints).

@@ -14,7 +14,7 @@ async function main(): Promise<number> {
       '',
       'Blackboard login (Syracuse University)',
       '--------------------------------------',
-      'A Chrome window will open using a dedicated blackboard-mcp profile.',
+      'A browser window will open using a dedicated blackboard-mcp profile (not your everyday browser).',
       'Sign in with your NetID and complete Duo exactly as you normally would.',
       'This tool never sees or stores your password, Duo codes, or MFA secrets.',
       'Waiting for you to finish (up to 15 minutes)...',
@@ -50,7 +50,7 @@ async function main(): Promise<number> {
     if (tickTimer) clearInterval(tickTimer);
     const who = identity.displayName ?? identity.userName ?? 'your account';
     process.stdout.write(`\nLogin successful — signed in as ${who}.\n`);
-    process.stdout.write(`Session saved in ${paths.profileDir}.\n`);
+    process.stdout.write(`Session saved in ${paths.home}.\n`);
     process.stdout.write('Next: quit and reopen your AI app (Claude Desktop starts the Blackboard tools by itself).\n');
     return 0;
   } finally {

@@ -45,7 +45,8 @@ describe('classifyLaunchError', () => {
     for (const err of [windows, mac]) {
       const classified = classifyLaunchError(err);
       expect(classified.code).toBe('BROWSER_LAUNCH_FAILED');
-      expect(classified.message).toContain('Google Chrome was not found');
+      expect(classified.message).toContain('Google Chrome could not be found');
+      expect(classified.message).toContain('Ask again');
     }
   });
 

@@ -55,7 +55,8 @@ export async function getJson<T = unknown>(
   if (resp.status === 403) {
     throw new BlackboardError(
       'PERMISSION_DENIED',
-      `Blackboard denied access to ${apiLabel(path)} (HTTP 403). This data is not visible to the signed-in student.`,
+      'Blackboard will not show this to your account. Courses from past terms are usually locked by the university; ' +
+        'for a current course, the instructor may have hidden this part.',
       { status: 403 },
     );
   }
@@ -95,7 +96,7 @@ export async function getJson<T = unknown>(
   } catch {
     throw new BlackboardError(
       'BLACKBOARD_REQUEST_FAILED',
-      `Blackboard returned non-JSON data for ${apiLabel(path)}. The session may have expired — run npm run status.`,
+      `Blackboard returned non-JSON data for ${apiLabel(path)}. The sign-in may have expired; ask again.`,
     );
   }
 }

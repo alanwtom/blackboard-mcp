@@ -34,7 +34,8 @@ function usage(): number {
       '',
     ].join('\n'),
   );
-  return 1;
+  // Not an error worth npm's red failure block: the student just needs the usage.
+  return 0;
 }
 
 async function main(): Promise<number> {
@@ -60,9 +61,9 @@ async function main(): Promise<number> {
       '',
       `Sign in to ${name}`,
       '-'.repeat(`Sign in to ${name}`.length),
-      'A Chrome window will open using the dedicated blackboard-mcp profile.',
+      'A browser window will open using the dedicated blackboard-mcp profile.',
       'Sign in there exactly as you normally would. This tool never sees or stores your password.',
-      'When you are done, close that Chrome window (or press Enter here).',
+      'When you are done, close that window (or press Enter here).',
       '',
       'If Google says "this browser or app may not be secure", it will not allow sign-in here.',
       'Ask the professor to share the file as "anyone with the link" instead.',

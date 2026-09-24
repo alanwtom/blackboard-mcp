@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getGrades } from '../blackboard/grades.js';
-import { errorResult, jsonResult, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
+import { errorResult, jsonResult, limitations, READ_ONLY_ANNOTATIONS, type BBToolContext } from './util.js';
 
 export function registerGradeTools(server: McpServer, ctx: BBToolContext): void {
   server.registerTool(
@@ -20,6 +20,7 @@ export function registerGradeTools(server: McpServer, ctx: BBToolContext): void 
       try {
         const grades = await ctx.callBB((http) => getGrades(http, args.course_id));
         const graded = grades.filter((g) => g.gradingStatus === 'graded');
+        const unknown = grades.filter((g) => g.gradingStatus === 'unknown');
         return jsonResult({
           course_id: args.course_id,
           count: grades.length,
@@ -36,6 +37,12 @@ export function registerGradeTools(server: McpServer, ctx: BBToolContext): void 
             due_date: g.dueDate,
             modified: g.modified,
           })),
+          ...limitations([
+            unknown.length > 0
+              ? `Blackboard did not answer for ${unknown.map((g) => `"${g.title}"`).join(', ')}, so ${unknown.length === 1 ? 'that grade is' : 'those grades are'} unknown here (not zero). Check the Grades page in Blackboard.`
+              : undefined,
+            'Only grades the instructor has released to students are visible; a hidden grade looks the same as no grade.',
+          ]),
         });
       } catch (err) {
         return errorResult(err);

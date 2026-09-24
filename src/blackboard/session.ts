@@ -499,6 +499,11 @@ export class BlackboardSession implements BBHttp {
     let lastReported = '';
     let lastState = '';
     while (Date.now() < deadline) {
+      // On a Mac, closing the last window leaves Chrome running with no tabs
+      // (no "close" event), so no open tabs also means the student closed it.
+      if (this.closed || this.openPageCount() === 0) {
+        throw new BlackboardError('NOT_LOGGED_IN', 'The sign-in window was closed before signing in. Ask again to reopen it.');
+      }
       const pages = this.context.pages();
 
       const watched = pages[pages.length - 1];
@@ -573,7 +578,7 @@ export class BlackboardSession implements BBHttp {
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
-    throw new BlackboardError('NOT_LOGGED_IN', 'Timed out waiting for Blackboard login. Run npm run login and complete SSO + Duo in the browser window.');
+    throw new BlackboardError('NOT_LOGGED_IN', 'Timed out waiting for the Blackboard sign-in. Ask again to reopen the sign-in window.');
   }
 
   /**
@@ -1243,7 +1248,10 @@ export class BlackboardSession implements BBHttp {
    * student still does all the typing.
    */
   async markLoginWindow(): Promise<void> {
-    const page = await this.ensureWorker();
+    // Mark only a window that is still open: going through ensureWorker here
+    // re-created the tab every few seconds after the student closed it.
+    const page = this.worker && !this.worker.isClosed() ? this.worker : this.context.pages()[0];
+    if (!page || page.isClosed()) return;
     await markPage(page, 'sign in with your NetID + Duo in THIS window (it has no bookmarks bar — that is how you know)');
   }
 
@@ -1291,8 +1299,10 @@ export class BlackboardSession implements BBHttp {
 
   /** Bring the login window to the front (once, at start of the login flow). */
   async focusLoginWindow(): Promise<void> {
-    const page = await this.ensureWorker();
-    await page.bringToFront().catch(() => undefined);
+    // Like markLoginWindow: never re-create a window the student closed.
+    const page = this.worker && !this.worker.isClosed() ? this.worker : this.context.pages()[0];
+    const target = page && !page.isClosed() ? page : await this.ensureWorker();
+    await target.bringToFront().catch(() => undefined);
   }
 
   async markVerified(): Promise<void> {

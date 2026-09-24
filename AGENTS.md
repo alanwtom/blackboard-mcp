@@ -23,3 +23,9 @@ These came from Anthropic's Opus 5.5 guidance (Sep 2026). They hold for any agen
   say plainly that nothing is), then the summary.
 - **Don't write "think hard" / "think carefully" into prompts, skills, goals or instructions.**
   The model already thinks before it replies; those lines only slow it down.
+
+## Shipped build
+
+- **`dist/` is committed on purpose.** Students run it directly, and setup installs only runtime
+  packages (no compiler), which keeps their download small. After any change under `src/`, run
+  `npm run build` and commit `dist/` in the same commit. `npm test` fails if it is stale.

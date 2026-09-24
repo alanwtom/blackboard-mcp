@@ -23,10 +23,9 @@ export function chromeInstallCandidates(): string[] {
     return roots.map((root) => path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'));
   }
   if (IS_MAC) {
-    return [
-      '/Applications/Google Chrome.app',
-      path.join(os.homedir(), 'Applications', 'Google Chrome.app'),
-    ];
+    // Only /Applications: Playwright looks for Chrome there and nowhere else,
+    // so a copy in ~/Applications passed this check and then failed to launch.
+    return ['/Applications/Google Chrome.app'];
   }
   return ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/opt/google/chrome/chrome'];
 }

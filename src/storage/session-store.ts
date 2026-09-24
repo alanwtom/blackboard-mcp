@@ -59,6 +59,14 @@ export interface SessionMeta {
   userName?: string;
   /** Origin (e.g. "https://blackboard.syracuse.edu") that holds the session. */
   authOrigin?: string;
+  /** Sites signed into with `npm run connect`, whose cookies are kept too. */
+  connectedSites?: string[];
+}
+
+/** Sites the student signed into with `npm run connect` (e.g. "zoom.us"). */
+export async function connectedSites(): Promise<string[]> {
+  const meta = await readMeta().catch(() => ({}) as SessionMeta);
+  return Array.isArray(meta.connectedSites) ? meta.connectedSites : [];
 }
 
 export async function readMeta(): Promise<SessionMeta> {
@@ -101,7 +109,13 @@ export interface StoredCookie {
 export async function saveCookies(cookies: StoredCookie[]): Promise<void> {
   await ensureDirs();
   const payload = JSON.stringify({ savedAt: new Date().toISOString(), cookies }, null, 2);
-  await fs.writeFile(paths.browserStateFile, payload, { encoding: 'utf8', mode: 0o600 });
+  // Write-then-rename: a crash mid-write must not leave half a file behind,
+  // which would read as "no cookies" and quietly sign the student out.
+  const tmp = `${paths.browserStateFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  await fs.writeFile(tmp, payload, { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(tmp, paths.browserStateFile);
+  // The mode above only applies when a file is created; tighten an older one too.
+  await fs.chmod(paths.browserStateFile, 0o600).catch(() => undefined);
 }
 
 export async function loadCookies(): Promise<StoredCookie[]> {
@@ -132,9 +146,34 @@ export async function hasSession(): Promise<boolean> {
   return hasStoredCookies();
 }
 
-/** Wipes the dedicated browser profile (logout). Requires no active browser. */
+/**
+ * Whether a Chrome is using the profile right now (the AI app's server, or
+ * another npm run command). Chrome marks the profile with a SingletonLock
+ * link naming "host-pid"; a lock left by a crashed Chrome names a dead pid.
+ */
+export async function isProfileInUse(): Promise<boolean> {
+  try {
+    const target = await fs.readlink(path.join(paths.profileDir, 'SingletonLock'));
+    const pid = Number(/-(\d+)$/.exec(target)?.[1]);
+    if (!pid) return true;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  } catch {
+    return false; // no lock (or Windows, which reports busy as EBUSY on delete)
+  }
+}
+
+/**
+ * Wipes the saved session (logout). The cookie snapshot goes first: it alone
+ * is enough to be signed in, so it must not survive a profile delete that
+ * fails half way (Windows refuses to delete files an open Chrome holds).
+ */
 export async function clearProfile(): Promise<void> {
-  await fs.rm(paths.profileDir, { recursive: true, force: true });
-  await fs.rm(paths.metaFile, { force: true });
   await fs.rm(paths.browserStateFile, { force: true });
+  await fs.rm(paths.metaFile, { force: true });
+  await fs.rm(paths.profileDir, { recursive: true, force: true });
 }

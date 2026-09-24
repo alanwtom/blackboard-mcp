@@ -51,7 +51,7 @@ async function main(): Promise<number> {
     const who = identity.displayName ?? identity.userName ?? 'your account';
     process.stdout.write(`\nLogin successful — signed in as ${who}.\n`);
     process.stdout.write(`Session saved in ${paths.profileDir}.\n`);
-    process.stdout.write('Next: run `npm run courses` to verify, then start the MCP server with `npm start`.\n');
+    process.stdout.write('Next: quit and reopen your AI app (Claude Desktop starts the Blackboard tools by itself).\n');
     return 0;
   } finally {
     await session.close();

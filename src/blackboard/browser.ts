@@ -40,7 +40,8 @@ export function classifyLaunchError(err: unknown): BlackboardError {
   if (isProfileBusyError(err)) {
     return new BlackboardError(
       'BROWSER_PROFILE_BUSY',
-      'The Blackboard browser profile is already in use by another blackboard-mcp process (CLI or MCP server). Close that process and try again.',
+      'Blackboard is already open in another app (Claude Desktop, a claude terminal session, or another npm run command). ' +
+        'It lets go after 5 idle minutes; or quit that app and try again.',
     );
   }
   if (isChannelMissingError(err) && CHROME_CHANNEL === 'chrome') {

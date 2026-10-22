@@ -109,6 +109,15 @@ function isProfileBusyError(err) {
     // second blackboard-mcp process looks like a random crash.
     return /has been closed/i.test(msg) && /exitCode=21\b/.test(msg);
 }
+/**
+ * A bare Linux install often lacks the shared libraries Chromium links against
+ * (libnspr4, libnss3, ...). Playwright reports that in the browser log, not on
+ * the first line, so this checks the whole message.
+ */
+function isMissingSystemLibraryError(err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /error while loading shared libraries|cannot open shared object file/i.test(msg);
+}
 function isChannelMissingError(err) {
     const msg = err instanceof Error ? err.message : String(err);
     return /executable doesn't exist|can't find.*chrome|chrome.*(?:not found|is not found at)/i.test(msg);
@@ -127,6 +136,10 @@ export function classifyLaunchError(err, browser = 'chrome') {
     if (isProfileBusyError(err)) {
         return new BlackboardError('BROWSER_PROFILE_BUSY', 'Blackboard is already open in another app (for example Claude Desktop and Claude Code at the same time). ' +
             'It lets go after 5 idle minutes; or quit the other app and try again.');
+    }
+    if (isMissingSystemLibraryError(err)) {
+        return new BlackboardError('BROWSER_LAUNCH_FAILED', `${browserName(browser)} is missing system libraries on this Linux computer. ` +
+            'Run this once in the project folder, then try again: sudo npx playwright install-deps chromium');
     }
     if (isChannelMissingError(err)) {
         return new BlackboardError('BROWSER_LAUNCH_FAILED', `${browserName(browser)} could not be found any more. Ask again and another browser will be used (or downloaded).`);

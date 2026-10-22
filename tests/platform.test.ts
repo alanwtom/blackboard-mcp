@@ -50,6 +50,20 @@ describe('classifyLaunchError', () => {
     }
   });
 
+  it('explains missing Linux system libraries and the one-time fix', () => {
+    const missingLib = new Error(
+      [
+        'browserType.launchPersistentContext: Target page, context or browser has been closed',
+        'Browser logs:',
+        '[pid=53422][err] /home/student/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome: error while loading shared libraries: libnspr4.so: cannot open shared object file: No such file or directory',
+      ].join('\n'),
+    );
+    const classified = classifyLaunchError(missingLib, 'chromium');
+    expect(classified.code).toBe('BROWSER_LAUNCH_FAILED');
+    expect(classified.message).toContain('missing system libraries');
+    expect(classified.message).toContain('sudo npx playwright install-deps chromium');
+  });
+
   it('keeps the message short instead of dumping the Chrome command line', () => {
     const noisy = new Error(`Something broke\n${'--some-chrome-flag '.repeat(400)}`);
     const classified = classifyLaunchError(noisy);

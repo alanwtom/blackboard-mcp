@@ -293,8 +293,9 @@ claude mcp add --scope user blackboard -- "$((Get-Command node).Source)" "$PWD\d
 - **Development**: `npm run typecheck`, `npm test` (fully mocked), `npm run build`,
   `npm start`, and `npm run discover` (records real Blackboard traffic while you browse, to
   verify endpoints).
-- **Platforms**: macOS and Windows 10/11 are both supported; Linux should work but is
-  untested. Everything OS-specific lives in `src/platform.ts` (Chrome and Claude Desktop
+- **Platforms**: macOS, Windows 10/11, and Linux are supported. Linux was tested on Ubuntu 24.04
+  (the full test suite, the MCP server, and a headless Chromium launch). A fresh Linux machine
+  may need the Chromium system libraries once: `sudo npx playwright install-deps chromium`. Everything OS-specific lives in `src/platform.ts` (Chrome and Claude Desktop
   locations, PATH lookup, spawning `.cmd` shims). Three Windows behaviours the code handles
   explicitly:
   - Downloaded file names are sanitized to Windows rules on every platform. A Blackboard file

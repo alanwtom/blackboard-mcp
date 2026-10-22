@@ -24,8 +24,11 @@ describe('shipped build', () => {
       execFileSync(process.execPath, [path.join(repo, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.json', '--outDir', out], { cwd: repo });
       const fresh = files(out).sort();
       expect(files(path.join(repo, 'dist')).sort()).toEqual(fresh);
+      // Git stores LF, but a Windows checkout with autocrlf writes CRLF, so compare
+      // line endings as LF: the content is what matters, not the newline style.
+      const lf = (file: string) => readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
       for (const f of fresh) {
-        expect(readFileSync(path.join(repo, 'dist', f), 'utf8'), `dist/${f} is out of date — run npm run build`).toBe(readFileSync(path.join(out, f), 'utf8'));
+        expect(lf(path.join(repo, 'dist', f)), `dist/${f} is out of date — run npm run build`).toBe(lf(path.join(out, f)));
       }
     } finally {
       rmSync(out, { recursive: true, force: true });
